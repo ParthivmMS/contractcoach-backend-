@@ -1,65 +1,83 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from PyPDF2 import PdfReader
-from docx import Document
-import requests
-
+import docx
+import openai  # For OpenRouter, we still use `openai.ChatCompletion` style
 import os
+import requests
 
 app = FastAPI()
 
-# Allow your frontend to call the backend
+# ===== CORS for frontend =====
+origins = ["*"]  # Adjust to your frontend domain in production
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # change this to your domain in production
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Your OpenRouter API Key
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Set in Render as environment variable
-OPENROUTER_MODEL = "mistral-7b-instruct"  # or whichever model you want
+# ===== OpenRouter API Key =====
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # or directly: "your_key_here"
+MODEL_NAME = "mistral"  # You can also choose other OpenRouter models
 
-def extract_text(file: UploadFile) -> str:
-    content = ""
-    if file.filename.lower().endswith(".pdf"):
-        pdf = PdfReader(file.file)
-        for page in pdf.pages:
-            content += page.extract_text() or ""
-    elif file.filename.lower().endswith((".doc", ".docx")):
-        doc = Document(file.file)
-        for para in doc.paragraphs:
-            content += para.text + "\n"
-    elif file.filename.lower().endswith(".txt"):
-        content = file.file.read().decode("utf-8")
-    return content
+# ===== Utility: Read file content =====
+def extract_text(file: UploadFile):
+    filename = file.filename.lower()
+    if filename.endswith(".pdf"):
+        reader = PdfReader(file.file)
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        return text
+    elif filename.endswith(".docx"):
+        doc = docx.Document(file.file)
+        text = "\n".join([para.text for para in doc.paragraphs])
+        return text
+    elif filename.endswith(".txt"):
+        return file.file.read().decode("utf-8")
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file type")
 
-def call_openrouter(prompt: str) -> str:
+# ===== OpenRouter summary =====
+def get_summary_openrouter(prompt):
     url = "https://openrouter.ai/api/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
         "Content-Type": "application/json"
     }
-    data = {
-        "model": OPENROUTER_MODEL,
+    payload = {
+        "model": MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 500
     }
-    response = requests.post(url, json=data, headers=headers)
-    response_json = response.json()
-    # Extract text from response
-    return response_json['choices'][0]['message']['content']
 
+    response = requests.post(url, json=payload)
+    if response.status_code != 200:
+        raise HTTPException(status_code=500, detail="Error calling OpenRouter API")
+    
+    data = response.json()
+    # OpenRouter usually returns summary in 'result' or 'completion'
+    if "result" in data:
+        return data["result"]
+    elif "completion" in data:
+        return data["completion"]
+    else:
+        # Fallback: print full response for debugging
+        print("OpenRouter response:", data)
+        return "No summary returned from OpenRouter"
+
+# ===== API Endpoint =====
 @app.post("/")
-async def analyze_file(file: UploadFile = File(...)):
+async def summarize_file(file: UploadFile = File(...)):
     try:
         text = extract_text(file)
         if not text.strip():
-            return {"summary": "No text found in the document."}
-
-        prompt = f"Summarize this contract text briefly:\n\n{text}"
-        summary = call_openrouter(prompt)
+            return {"summary": "The file is empty or could not extract text."}
+        
+        summary = get_summary_openrouter(text)
         return {"summary": summary}
     except Exception as e:
-        return {"summary": f"Error: {str(e)}"}
+        print("Error:", str(e))
+        raise HTTPException(status_code=500, detail=str(e))
