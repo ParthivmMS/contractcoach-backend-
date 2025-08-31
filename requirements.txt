@@ -3,4 +3,4 @@ uvicorn
 python-multipart
 PyPDF2
 python-docx
-openai
+requests
