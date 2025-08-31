@@ -1,83 +1,64 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from PyPDF2 import PdfReader
-import docx
-import openai  # For OpenRouter, we still use `openai.ChatCompletion` style
 import os
 import requests
+from fastapi import FastAPI, UploadFile, Form
+from fastapi.middleware.cors import CORSMiddleware
+from PyPDF2 import PdfReader
+from docx import Document
 
 app = FastAPI()
 
-# ===== CORS for frontend =====
-origins = ["*"]  # Adjust to your frontend domain in production
+# Allow CORS (so frontend can talk to backend)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# ===== OpenRouter API Key =====
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # or directly: "your_key_here"
-MODEL_NAME = "mistral"  # You can also choose other OpenRouter models
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# ===== Utility: Read file content =====
-def extract_text(file: UploadFile):
-    filename = file.filename.lower()
-    if filename.endswith(".pdf"):
-        reader = PdfReader(file.file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() or ""
-        return text
-    elif filename.endswith(".docx"):
-        doc = docx.Document(file.file)
-        text = "\n".join([para.text for para in doc.paragraphs])
-        return text
-    elif filename.endswith(".txt"):
-        return file.file.read().decode("utf-8")
+def extract_text_from_file(file: UploadFile) -> str:
+    if file.filename.endswith(".pdf"):
+        pdf_reader = PdfReader(file.file)
+        return " ".join(page.extract_text() or "" for page in pdf_reader.pages)
+    elif file.filename.endswith(".docx"):
+        doc = Document(file.file)
+        return " ".join(paragraph.text for paragraph in doc.paragraphs)
     else:
-        raise HTTPException(status_code=400, detail="Unsupported file type")
+        return file.file.read().decode("utf-8")
 
-# ===== OpenRouter summary =====
-def get_summary_openrouter(prompt):
-    url = "https://openrouter.ai/api/v1/chat/completions"
+def summarize_text(text: str) -> str:
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
+
     payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 500
+        "model": "mistralai/mistral-7b-instruct",  # You can switch models
+        "messages": [
+            {"role": "system", "content": "You are a legal document summarizer."},
+            {"role": "user", "content": f"Summarize this contract:\n\n{text}"}
+        ],
     }
 
-    response = requests.post(url, json=payload)
-    if response.status_code != 200:
-        raise HTTPException(status_code=500, detail="Error calling OpenRouter API")
-    
-    data = response.json()
-    # OpenRouter usually returns summary in 'result' or 'completion'
-    if "result" in data:
-        return data["result"]
-    elif "completion" in data:
-        return data["completion"]
-    else:
-        # Fallback: print full response for debugging
-        print("OpenRouter response:", data)
-        return "No summary returned from OpenRouter"
+    response = requests.post(OPENROUTER_URL, headers=headers, json=payload)
 
-# ===== API Endpoint =====
-@app.post("/")
-async def summarize_file(file: UploadFile = File(...)):
     try:
-        text = extract_text(file)
-        if not text.strip():
-            return {"summary": "The file is empty or could not extract text."}
-        
-        summary = get_summary_openrouter(text)
-        return {"summary": summary}
-    except Exception as e:
-        print("Error:", str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        data = response.json()
+    except Exception:
+        return f"Error: Could not parse JSON. Raw response: {response.text}"
+
+    # ✅ Safely extract response
+    if "choices" in data and len(data["choices"]) > 0:
+        return data["choices"][0]["message"]["content"].strip()
+    else:
+        # Debugging output
+        return f"Error: Unexpected response format.\n\n{data}"
+
+@app.post("/summarize/")
+async def summarize_contract(file: UploadFile, task: str = Form("summarize")):
+    text = extract_text_from_file(file)
+    summary = summarize_text(text)
+    return {"summary": summary}
