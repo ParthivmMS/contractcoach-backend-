@@ -1,65 +1,100 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+# main.py
+from fastapi import FastAPI, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-import os
+from fastapi.responses import JSONResponse
+from PyPDF2 import PdfReader
+import docx
 import openai
-import tempfile
+import os
 
-# --- Initialize app ---
+# ------------------------------
+# CONFIG
+# ------------------------------
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")  # set in Render secrets
+MODEL_NAME = "gpt-4o-mini"  # adjust if needed
+
+openai.api_key = OPENROUTER_API_KEY
+
+# ------------------------------
+# FASTAPI INIT
+# ------------------------------
 app = FastAPI(title="ContractCoach Backend")
 
-# --- CORS settings ---
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # For testing. Later, replace "*" with your frontend URL
+    allow_origins=["*"],  # replace "*" with your frontend domain for production
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# --- API Key from environment variable ---
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-if not OPENROUTER_API_KEY:
-    raise ValueError("OPENROUTER_API_KEY is missing in environment variables")
+# ------------------------------
+# UTILITY: Extract text from file
+# ------------------------------
+async def extract_text(file: UploadFile):
+    filename = file.filename.lower()
+    if filename.endswith(".txt"):
+        return (await file.read()).decode("utf-8", errors="ignore")
+    elif filename.endswith(".docx"):
+        doc = docx.Document(file.file)
+        return "\n".join([p.text for p in doc.paragraphs])
+    elif filename.endswith(".pdf"):
+        reader = PdfReader(file.file)
+        text = ""
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        return text
+    else:
+        return ""
 
-openai.api_key = OPENROUTER_API_KEY
-
-# --- Endpoint to check health ---
-@app.get("/")
-async def root():
-    return {"message": "ContractCoach backend is running"}
-
-# --- Endpoint to analyze uploaded file ---
-@app.post("/analyze")
+# ------------------------------
+# ROUTE: POST /
+# ------------------------------
+@app.post("/")
 async def analyze_contract(file: UploadFile = File(...)):
-    # Limit file types
-    if file.content_type not in ["application/pdf", "application/msword", 
-                                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                                 "text/plain"]:
-        raise HTTPException(status_code=400, detail="Invalid file type")
-
-    # Save uploaded file temporarily
-    with tempfile.NamedTemporaryFile(delete=False, suffix=file.filename) as tmp:
-        content = await file.read()
-        tmp.write(content)
-        tmp_path = tmp.name
-
-    # Read content as text (basic; for PDF/DOCX you may need libraries like pdfplumber or docx)
-    text_content = content.decode("utf-8", errors="ignore")  # fallback for TXT
-
-    # --- Call OpenRouter (Mistral or GPT) ---
     try:
-        response = openai.chat.completions.create(
-            model="mistral-7b-instruct",   # or another OpenRouter model
-            messages=[
-                {"role": "system", "content": "You are an AI legal assistant that summarizes contracts."},
-                {"role": "user", "content": f"Summarize this contract and highlight risks:\n{text_content}"}
-            ],
+        # Step 1: Extract text
+        text = await extract_text(file)
+        if not text.strip():
+            return JSONResponse(
+                status_code=400,
+                content={"summary": "Unable to extract text from this file."}
+            )
+
+        # Step 2: Prepare prompt for OpenRouter
+        prompt = f"""
+        Summarize the following legal contract clearly and concisely.
+        Highlight key clauses, risks, and recommendations.
+
+        Contract Text:
+        {text[:5000]}  # limit input for token safety
+        """
+
+        # Step 3: Call OpenRouter API
+        response = openai.ChatCompletion.create(
+            model=MODEL_NAME,
+            messages=[{"role": "user", "content": prompt}],
             temperature=0.2,
-            max_tokens=1000
+            max_tokens=500
         )
-        summary = response.choices[0].message["content"]
+
+        summary = response['choices'][0]['message']['content']
+
+        # Step 4: Return JSON
+        return {"summary": summary}
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"AI API error: {e}")
+        print("Error analyzing contract:", e)
+        return JSONResponse(
+            status_code=500,
+            content={"summary": "Failed to analyze file. Please try again later."}
+        )
 
-    return {"summary": summary}
+# ------------------------------
+# ROUTE: HEALTHCHECK
+# ------------------------------
+@app.get("/health")
+async def healthcheck():
+    return {"status": "ok"}
