@@ -14,8 +14,8 @@ const PORT = process.env.PORT || 3000;
 app.use(cors({
     origin: [
         'http://localhost:3000',
-        'https://your-frontend-domain.vercel.app',
-        'https://ai-contractcoach.vercel.app',
+        'https://ai-contractcoach.vercel.app/',
+        'ai-contractcoach-parthiv-m-ss-projects.vercel.app',
         // Add your actual Vercel domain here
     ],
     credentials: true
