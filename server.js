@@ -127,7 +127,7 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
                 textLength: contractText.length,
                 processedAt: new Date().toISOString(),
                 source: req.file ? 'file' : 'text',
-                model: 'meta-llama/llama-3.1-8b-instruct'
+                model: 'openai/gpt-4o-mini'
             }
         });
 
@@ -242,8 +242,8 @@ Focus on: payment terms, termination clauses, IP ownership, liability, confident
 
 Contract: ${promptContract}${truncatedNotice}`;
 
-    // FIX: retry once on transient errors
-    const MAX_ATTEMPTS = 2;
+    // FIX: retry up to 3 attempts on transient errors
+    const MAX_ATTEMPTS = 3;
     let attempt = 0;
     let lastError = null;
 
@@ -254,7 +254,7 @@ Contract: ${promptContract}${truncatedNotice}`;
             const response = await axios.post(
                 'https://openrouter.ai/api/v1/chat/completions',
                 {
-                    model: 'meta-llama/llama-3.1-8b-instruct',
+                    model: 'openai/gpt-4o-mini', // <-- changed model to a broadly available identifier
                     messages: [
                         { role: 'system', content: 'You are a contract analysis expert. Respond only with valid JSON.' },
                         { role: 'user', content: prompt }
@@ -269,9 +269,16 @@ Contract: ${promptContract}${truncatedNotice}`;
                         'HTTP-Referer': 'https://contractcoach.com',
                         'X-Title': 'ContractCoach'
                     },
-                    timeout: 30000
+                    timeout: 45000,
+                    validateStatus: null // allow us to inspect non-2xx responses and log them
                 }
             );
+
+            // If non-2xx, log body and status to help debugging
+            if (response.status && (response.status < 200 || response.status >= 300)) {
+                console.error('🔴 OpenRouter HTTP error:', response.status, response.data);
+                throw new Error(`OpenRouter returned HTTP ${response.status}`);
+            }
 
             // FIX: tolerate multiple response shapes
             let aiContent = '';
@@ -337,6 +344,10 @@ Contract: ${promptContract}${truncatedNotice}`;
 
         } catch (error) {
             lastError = error;
+            // Log response body if axios provided it
+            if (error.response) {
+                console.error('🔴 OpenRouter axios error response:', error.response.status, error.response.data);
+            }
             const status = error.response && error.response.status;
             console.error(`🔴 OpenRouter attempt ${attempt} failed:`, (error.message || error) + (status ? ` (status ${status})` : ''));
             // retry only on server errors or rate limit
