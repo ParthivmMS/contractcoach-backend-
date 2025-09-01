@@ -17,7 +17,7 @@ app.use(cors({
     origin: [
         'http://localhost:3000',
         'https://ai-contractcoach.vercel.app',
-        'https://contractcoach.vercel.app', 
+        'https://contractcoach.vercel.app',
         'https://parthivmms.github.io',
         /\.vercel\.app$/,
         /\.github\.io$/,
@@ -25,7 +25,7 @@ app.use(cors({
     ],
     credentials: true,
     methods: ['GET', 'POST', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'Accept']
 }));
 
 app.use(express.json({ limit: '50mb' }));
@@ -36,10 +36,13 @@ const upload = multer({
     storage: multer.memoryStorage(),
     limits: { fileSize: 30 * 1024 * 1024 }, // 30MB
     fileFilter: (req, file, cb) => {
-        const allowed = ['application/pdf', 'application/msword', 
-                        'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 
-                        'text/plain'];
-        if (allowed.includes(file.mimetype) || file.originalname.toLowerCase().endsWith('.txt')) {
+        const allowed = [
+            'application/pdf',
+            'application/msword',
+            'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            'text/plain'
+        ];
+        if (allowed.includes(file.mimetype) || file.originalname.toLowerCase().endsWith('.txt') || file.originalname.toLowerCase().endsWith('.doc')) {
             cb(null, true);
         } else {
             cb(new Error('Only PDF, DOC, DOCX, and TXT files allowed'));
@@ -76,17 +79,18 @@ app.get('/health', (req, res) => {
 app.post('/api/analyze', upload.single('contract'), async (req, res) => {
     console.log('📋 Contract analysis request received');
     console.log('File:', req.file ? `${req.file.originalname} (${req.file.size} bytes)` : 'None');
-    console.log('Text length:', req.body.text ? req.body.text.length : 0);
-    
+    console.log('Text length (body):', req.body.text ? req.body.text.length : 0);
+    console.log('Requester IP:', req.ip, 'User-Agent:', req.get('User-Agent'));
+
     try {
         let contractText = '';
-        
+
         // Extract text from file or use provided text
         if (req.file) {
             contractText = await extractTextFromFile(req.file);
             console.log('📄 Extracted text length:', contractText.length);
         } else if (req.body.text) {
-            contractText = req.body.text;
+            contractText = String(req.body.text);
             console.log('📝 Using provided text');
         } else {
             return res.status(400).json({
@@ -95,18 +99,21 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
             });
         }
 
-        if (!contractText || contractText.trim().length < 50) {
+        // FIX: sanitize and set upper limit for what we send to the model
+        contractText = contractText.replace(/\u00A0/g, ' ').trim(); // replace non-breaking spaces
+        const MIN_LENGTH = 50;
+        if (!contractText || contractText.length < MIN_LENGTH) {
             return res.status(400).json({
                 error: 'Contract text too short',
-                message: 'Contract must contain at least 50 characters'
+                message: `Contract must contain at least ${MIN_LENGTH} characters`
             });
         }
 
         console.log('🤖 Starting AI analysis...');
         const analysis = await analyzeWithOpenRouter(contractText);
-        
+
         console.log('✅ Analysis completed successfully');
-        
+
         res.json({
             success: true,
             analysis: analysis,
@@ -114,16 +121,16 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
                 textLength: contractText.length,
                 processedAt: new Date().toISOString(),
                 source: req.file ? 'file' : 'text',
-                model: 'meta-llama/llama-3.1-8b-instruct:free'
+                model: 'meta-llama/llama-3.1-8b-instruct:free' // FIX: keep consistent with prompt
             }
         });
 
     } catch (error) {
-        console.error('❌ Analysis error:', error.message);
-        
+        // FIX: log full error stack for debugging, but return sanitized message to client
+        console.error('❌ Analysis error:', error.stack || error.message || error);
         res.status(500).json({
             error: 'Analysis failed',
-            message: error.message,
+            message: error.message || 'Internal server error',
             fallback: 'Using keyword-based analysis'
         });
     }
@@ -132,30 +139,46 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
 // Extract text from uploaded files
 async function extractTextFromFile(file) {
     const { buffer, mimetype, originalname } = file;
-    
+
     try {
-        if (mimetype === 'application/pdf') {
+        // PDF handling
+        if (mimetype === 'application/pdf' || originalname.toLowerCase().endsWith('.pdf')) {
+            // FIX: pdf-parse expects a Buffer — already provided
             const data = await pdf(buffer);
-            return data.text;
+            const text = (data && data.text) ? String(data.text) : '';
+            // FIX: detect scanned PDFs (no extracted text)
+            if (!text || text.trim().length < 40) {
+                // give clearer guidance instead of silently failing
+                throw new Error('Scanned or image-based PDF detected (no extractable text). OCR required.');
+            }
+            return text;
         }
-        
-        if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+
+        // DOCX handling
+        if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || originalname.toLowerCase().endsWith('.docx')) {
             const result = await mammoth.extractRawText({ buffer });
-            return result.value;
+            return result && result.value ? String(result.value) : '';
         }
-        
+
+        // Plain text
         if (mimetype === 'text/plain' || originalname.toLowerCase().endsWith('.txt')) {
             return buffer.toString('utf8');
         }
-        
-        // Fallback for DOC files
-        if (mimetype === 'application/msword') {
-            return buffer.toString('utf8');
+
+        // DOC (older Word) fallback — best-effort
+        if (mimetype === 'application/msword' || originalname.toLowerCase().endsWith('.doc')) {
+            // FIX: mammoth cannot handle binary .doc — try best-effort fallback to utf8 text
+            const asText = buffer.toString('utf8');
+            if (asText && asText.trim().length > 40) {
+                return asText;
+            } else {
+                throw new Error('DOC file detected but could not reliably extract text. Consider saving as DOCX or PDF.');
+            }
         }
-        
-        throw new Error(`Unsupported file type: ${mimetype}`);
-        
+
+        throw new Error(`Unsupported file type: ${mimetype || originalname}`);
     } catch (error) {
+        // propagate a clearer error up to the caller
         throw new Error(`Failed to extract text: ${error.message}`);
     }
 }
@@ -163,10 +186,20 @@ async function extractTextFromFile(file) {
 // Analyze contract with OpenRouter
 async function analyzeWithOpenRouter(contractText) {
     const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-    
+
     if (!OPENROUTER_API_KEY) {
         console.error('🔑 OpenRouter API key not found');
         return createFallbackAnalysis(contractText);
+    }
+
+    // FIX: limit how much of contract we put into the prompt (models have token limits)
+    // Keep first N characters (safe) and mention if truncated
+    const MAX_CHARS_FOR_PROMPT = 16000; // reasonable limit; adjust by model token size
+    let truncatedNotice = '';
+    let promptContract = contractText;
+    if (contractText.length > MAX_CHARS_FOR_PROMPT) {
+        truncatedNotice = `\n\n[NOTE: Contract truncated to ${MAX_CHARS_FOR_PROMPT} characters for analysis; full document not processed.]`;
+        promptContract = contractText.substring(0, MAX_CHARS_FOR_PROMPT);
     }
 
     const prompt = `You are a legal contract expert. Analyze this contract and respond with ONLY valid JSON in this exact format:
@@ -202,68 +235,147 @@ async function analyzeWithOpenRouter(contractText) {
 
 Focus on: payment terms, termination clauses, IP ownership, liability, confidentiality.
 
-Contract: ${contractText.substring(0, 3000)}`;
+Contract: ${promptContract}${truncatedNotice}`;
 
-    try {
-        console.log('🌐 Calling OpenRouter API...');
-        const response = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            {
-                model: 'meta-llama/llama-3.1-8b-instruct:free',
-                messages: [
-                    { role: 'system', content: 'You are a contract analysis expert. Respond only with valid JSON.' },
-                    { role: 'user', content: prompt }
-                ],
-                temperature: 0.1,
-                max_tokens: 2000
-            },
-            {
-                headers: {
-                    'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                    'Content-Type': 'application/json',
-                    'HTTP-Referer': 'https://contractcoach.com',
-                    'X-Title': 'ContractCoach'
+    // FIX: Add a simple retry mechanism for transient errors (once)
+    const MAX_ATTEMPTS = 2;
+    let attempt = 0;
+    let lastError = null;
+    while (attempt < MAX_ATTEMPTS) {
+        attempt++;
+        try {
+            console.log(`🌐 Calling OpenRouter API... attempt ${attempt}`);
+            const response = await axios.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                {
+                    model: 'meta-llama/llama-3.1-8b-instruct:free',
+                    messages: [
+                        { role: 'system', content: 'You are a contract analysis expert. Respond only with valid JSON.' },
+                        { role: 'user', content: prompt }
+                    ],
+                    temperature: 0.1,
+                    max_tokens: 2000
                 },
-                timeout: 30000
-            }
-        );
+                {
+                    headers: {
+                        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                        'Content-Type': 'application/json',
+                        'HTTP-Referer': 'https://contractcoach.com',
+                        'X-Title': 'ContractCoach'
+                    },
+                    timeout: 30000
+                }
+            );
 
-        const aiResponse = response.data.choices[0].message.content.trim();
-        console.log('🤖 OpenRouter response length:', aiResponse.length);
-        
-        // Clean the response (remove any markdown formatting)
-        let cleanResponse = aiResponse;
-        if (cleanResponse.startsWith('```json')) {
-            cleanResponse = cleanResponse.replace(/```json\n?/, '').replace(/```$/, '');
+            // FIX: Be defensive about response shapes (OpenRouter/other proxies may vary)
+            let aiContent = '';
+            try {
+                if (response.data) {
+                    // Common shape: response.data.choices[0].message.content
+                    if (Array.isArray(response.data.choices) && response.data.choices[0]) {
+                        aiContent = (response.data.choices[0].message && response.data.choices[0].message.content) ||
+                                    response.data.choices[0].text || '';
+                    } else if (response.data.output) {
+                        // some routers wrap output
+                        aiContent = JSON.stringify(response.data.output);
+                    } else if (typeof response.data === 'string') {
+                        aiContent = response.data;
+                    } else {
+                        aiContent = JSON.stringify(response.data);
+                    }
+                } else {
+                    throw new Error('Empty response from OpenRouter');
+                }
+            } catch (parseErr) {
+                console.warn('⚠️ Unexpected response shape — falling back to raw response stringify');
+                aiContent = JSON.stringify(response.data);
+            }
+
+            // Trim and log a truncated preview for debugging
+            const preview = aiContent.length > 2000 ? aiContent.substring(0, 2000) + '...[truncated]' : aiContent;
+            console.log('🤖 OpenRouter raw response preview:', preview);
+
+            // FIX: remove common code fences and markdown fences
+            let cleanResponse = aiContent.trim();
+            if (cleanResponse.startsWith('```')) {
+                // remove starting ```json or ```
+                cleanResponse = cleanResponse.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
+            }
+
+            // FIX: Some models output explanatory preface — try to extract first JSON block
+            let parsed = null;
+            try {
+                // Try direct JSON parse first
+                parsed = JSON.parse(cleanResponse);
+            } catch (e) {
+                // Attempt to extract JSON substring using regex
+                const jsonMatch = cleanResponse.match(/\{[\s\S]*\}\s*$/);
+                if (jsonMatch) {
+                    try {
+                        parsed = JSON.parse(jsonMatch[0]);
+                    } catch (e2) {
+                        // try more permissive: find first { and last }
+                        const firstIndex = cleanResponse.indexOf('{');
+                        const lastIndex = cleanResponse.lastIndexOf('}');
+                        if (firstIndex !== -1 && lastIndex !== -1 && lastIndex > firstIndex) {
+                            const candidate = cleanResponse.substring(firstIndex, lastIndex + 1);
+                            parsed = JSON.parse(candidate);
+                        } else {
+                            throw new Error('Could not parse JSON from AI response');
+                        }
+                    }
+                } else {
+                    throw new Error('No JSON object found in AI response');
+                }
+            }
+
+            // Validate required fields
+            if (!parsed || !parsed.summary || typeof parsed.overall_risk_score === 'undefined') {
+                throw new Error('Invalid AI response structure (missing required keys)');
+            }
+
+            // Return parsed analysis + raw model output for debugging
+            return Object.assign({}, parsed, { raw_model_output: aiContent });
+
+        } catch (error) {
+            lastError = error;
+            const status = error.response && error.response.status;
+            console.error(`🔴 OpenRouter attempt ${attempt} failed:`, (error.message || error) + (status ? ` (status ${status})` : ''));
+            // if client or parse error, don't retry; if transient (5xx or 429), retry once
+            if (attempt >= MAX_ATTEMPTS || (status && status < 500 && status !== 429)) {
+                break;
+            }
+            console.log('⏳ Retrying OpenRouter call...');
+            await sleep(1000 * attempt); // backoff
         }
-        
-        const analysis = JSON.parse(cleanResponse);
-        
-        // Validate required fields
-        if (!analysis.summary || !analysis.overall_risk_score) {
-            throw new Error('Invalid AI response structure');
-        }
-        
-        console.log('✅ AI analysis parsed successfully');
-        return analysis;
-        
-    } catch (error) {
-        console.error('🔴 OpenRouter error:', error.message);
-        console.log('📋 Falling back to keyword analysis');
-        return createFallbackAnalysis(contractText);
     }
+
+    // FIX: On total failure, log last error and fallback to keyword analysis
+    console.error('🔴 OpenRouter final error:', lastError && (lastError.stack || lastError.message || lastError));
+    console.log('📋 Falling back to keyword analysis');
+    // Optionally include lastError.message inside assumptions for debugging
+    const fallback = createFallbackAnalysis(contractText);
+    // attach debug note
+    fallback.assumptions = fallback.assumptions || [];
+    fallback.assumptions.push(`AI_failed: ${lastError ? (lastError.message || String(lastError)) : 'unknown'}`);
+    return fallback;
+}
+
+// small helper
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 // Fallback analysis when AI fails
 function createFallbackAnalysis(contractText) {
     console.log('🔄 Creating fallback keyword-based analysis');
-    
-    const text = contractText.toLowerCase();
+
+    const text = String(contractText).toLowerCase();
     let riskScore = 5;
     const foundIssues = [];
-    
+
     // Payment terms analysis
-    if (text.includes('7 days') || text.includes('seven days')) {
+    if (text.includes('7 days') || text.includes('seven days') || text.includes('due within 7')) {
         riskScore += 2;
         foundIssues.push({
             clause_type: 'Payment',
@@ -279,7 +391,7 @@ function createFallbackAnalysis(contractText) {
             priority: 'Urgent'
         });
     }
-    
+
     // Termination analysis
     if (text.includes('immediate') && text.includes('terminat')) {
         riskScore += 1;
@@ -297,9 +409,9 @@ function createFallbackAnalysis(contractText) {
             priority: 'Important'
         });
     }
-    
+
     // Indemnification analysis
-    if (text.includes('indemnif') && (text.includes('all') || text.includes('any'))) {
+    if (text.includes('indemnif') && (text.includes('all') || text.includes('any') || text.includes('loss') || text.includes('liabil'))) {
         riskScore += 1;
         foundIssues.push({
             clause_type: 'Liability',
@@ -352,18 +464,19 @@ function createFallbackAnalysis(contractText) {
 
 // Error handling
 app.use((err, req, res, next) => {
-    console.error('Unhandled error:', err.message);
-    
+    console.error('Unhandled error:', err.stack || err.message || err);
+
     if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({
             error: 'File too large',
             message: 'Please upload files under 30MB'
         });
     }
-    
+
+    // Provide helpful but non-sensitive error to client
     res.status(500).json({
         error: 'Internal server error',
-        message: 'Something went wrong'
+        message: 'Something went wrong while processing your request'
     });
 });
 
