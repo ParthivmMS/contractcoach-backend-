@@ -25,6 +25,7 @@ app.use(cors({
     ],
     credentials: true,
     methods: ['GET', 'POST', 'OPTIONS'],
+    // FIX: allow common headers used by fetch/XHR
     allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'Accept']
 }));
 
@@ -42,7 +43,9 @@ const upload = multer({
             'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
             'text/plain'
         ];
-        if (allowed.includes(file.mimetype) || file.originalname.toLowerCase().endsWith('.txt') || file.originalname.toLowerCase().endsWith('.doc')) {
+        if (allowed.includes(file.mimetype) ||
+            file.originalname.toLowerCase().endsWith('.txt') ||
+            file.originalname.toLowerCase().endsWith('.doc')) {
             cb(null, true);
         } else {
             cb(new Error('Only PDF, DOC, DOCX, and TXT files allowed'));
@@ -99,8 +102,8 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
             });
         }
 
-        // FIX: sanitize and set upper limit for what we send to the model
-        contractText = contractText.replace(/\u00A0/g, ' ').trim(); // replace non-breaking spaces
+        // FIX: sanitize and set minimum length
+        contractText = contractText.replace(/\u00A0/g, ' ').trim();
         const MIN_LENGTH = 50;
         if (!contractText || contractText.length < MIN_LENGTH) {
             return res.status(400).json({
@@ -114,19 +117,21 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
 
         console.log('✅ Analysis completed successfully');
 
+        // Ensure consistent response shape (FIX)
+        const normalized = ensureAnalysisShape(analysis);
+
         res.json({
             success: true,
-            analysis: analysis,
+            analysis: normalized,
             metadata: {
                 textLength: contractText.length,
                 processedAt: new Date().toISOString(),
                 source: req.file ? 'file' : 'text',
-                model: 'meta-llama/llama-3.1-8b-instruct:free' // FIX: keep consistent with prompt
+                model: 'meta-llama/llama-3.1-8b-instruct:free'
             }
         });
 
     } catch (error) {
-        // FIX: log full error stack for debugging, but return sanitized message to client
         console.error('❌ Analysis error:', error.stack || error.message || error);
         res.status(500).json({
             error: 'Analysis failed',
@@ -143,19 +148,19 @@ async function extractTextFromFile(file) {
     try {
         // PDF handling
         if (mimetype === 'application/pdf' || originalname.toLowerCase().endsWith('.pdf')) {
-            // FIX: pdf-parse expects a Buffer — already provided
             const data = await pdf(buffer);
             const text = (data && data.text) ? String(data.text) : '';
             // FIX: detect scanned PDFs (no extracted text)
             if (!text || text.trim().length < 40) {
-                // give clearer guidance instead of silently failing
+                // Provide clear guidance for OCR
                 throw new Error('Scanned or image-based PDF detected (no extractable text). OCR required.');
             }
             return text;
         }
 
         // DOCX handling
-        if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || originalname.toLowerCase().endsWith('.docx')) {
+        if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+            originalname.toLowerCase().endsWith('.docx')) {
             const result = await mammoth.extractRawText({ buffer });
             return result && result.value ? String(result.value) : '';
         }
@@ -167,7 +172,6 @@ async function extractTextFromFile(file) {
 
         // DOC (older Word) fallback — best-effort
         if (mimetype === 'application/msword' || originalname.toLowerCase().endsWith('.doc')) {
-            // FIX: mammoth cannot handle binary .doc — try best-effort fallback to utf8 text
             const asText = buffer.toString('utf8');
             if (asText && asText.trim().length > 40) {
                 return asText;
@@ -178,7 +182,6 @@ async function extractTextFromFile(file) {
 
         throw new Error(`Unsupported file type: ${mimetype || originalname}`);
     } catch (error) {
-        // propagate a clearer error up to the caller
         throw new Error(`Failed to extract text: ${error.message}`);
     }
 }
@@ -189,12 +192,14 @@ async function analyzeWithOpenRouter(contractText) {
 
     if (!OPENROUTER_API_KEY) {
         console.error('🔑 OpenRouter API key not found');
-        return createFallbackAnalysis(contractText);
+        // Attach assumption to fallback for debugging
+        const fallback = createFallbackAnalysis(contractText);
+        fallback.assumptions = (fallback.assumptions || []).concat(['AI_unavailable: OPENROUTER_API_KEY missing']);
+        return fallback;
     }
 
-    // FIX: limit how much of contract we put into the prompt (models have token limits)
-    // Keep first N characters (safe) and mention if truncated
-    const MAX_CHARS_FOR_PROMPT = 16000; // reasonable limit; adjust by model token size
+    // FIX: limit prompt size and add truncated notice
+    const MAX_CHARS_FOR_PROMPT = 16000;
     let truncatedNotice = '';
     let promptContract = contractText;
     if (contractText.length > MAX_CHARS_FOR_PROMPT) {
@@ -237,10 +242,11 @@ Focus on: payment terms, termination clauses, IP ownership, liability, confident
 
 Contract: ${promptContract}${truncatedNotice}`;
 
-    // FIX: Add a simple retry mechanism for transient errors (once)
+    // FIX: retry once on transient errors
     const MAX_ATTEMPTS = 2;
     let attempt = 0;
     let lastError = null;
+
     while (attempt < MAX_ATTEMPTS) {
         attempt++;
         try {
@@ -267,97 +273,86 @@ Contract: ${promptContract}${truncatedNotice}`;
                 }
             );
 
-            // FIX: Be defensive about response shapes (OpenRouter/other proxies may vary)
+            // FIX: tolerate multiple response shapes
             let aiContent = '';
-            try {
-                if (response.data) {
-                    // Common shape: response.data.choices[0].message.content
-                    if (Array.isArray(response.data.choices) && response.data.choices[0]) {
-                        aiContent = (response.data.choices[0].message && response.data.choices[0].message.content) ||
-                                    response.data.choices[0].text || '';
-                    } else if (response.data.output) {
-                        // some routers wrap output
-                        aiContent = JSON.stringify(response.data.output);
-                    } else if (typeof response.data === 'string') {
-                        aiContent = response.data;
-                    } else {
-                        aiContent = JSON.stringify(response.data);
-                    }
+            if (response && response.data) {
+                if (Array.isArray(response.data.choices) && response.data.choices[0]) {
+                    aiContent = (response.data.choices[0].message && response.data.choices[0].message.content) ||
+                                response.data.choices[0].text || '';
+                } else if (response.data.output) {
+                    aiContent = JSON.stringify(response.data.output);
+                } else if (typeof response.data === 'string') {
+                    aiContent = response.data;
                 } else {
-                    throw new Error('Empty response from OpenRouter');
+                    aiContent = JSON.stringify(response.data);
                 }
-            } catch (parseErr) {
-                console.warn('⚠️ Unexpected response shape — falling back to raw response stringify');
-                aiContent = JSON.stringify(response.data);
+            } else {
+                throw new Error('Empty response from OpenRouter');
             }
 
-            // Trim and log a truncated preview for debugging
-            const preview = aiContent.length > 2000 ? aiContent.substring(0, 2000) + '...[truncated]' : aiContent;
+            const preview = aiContent.length > 1500 ? aiContent.substring(0, 1500) + '...[truncated]' : aiContent;
             console.log('🤖 OpenRouter raw response preview:', preview);
 
-            // FIX: remove common code fences and markdown fences
+            // FIX: strip code fences and attempt to parse JSON robustly
             let cleanResponse = aiContent.trim();
             if (cleanResponse.startsWith('```')) {
-                // remove starting ```json or ```
                 cleanResponse = cleanResponse.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
             }
 
-            // FIX: Some models output explanatory preface — try to extract first JSON block
+            // Attempt direct JSON parse
             let parsed = null;
             try {
-                // Try direct JSON parse first
                 parsed = JSON.parse(cleanResponse);
             } catch (e) {
-                // Attempt to extract JSON substring using regex
+                // Try to extract JSON block
                 const jsonMatch = cleanResponse.match(/\{[\s\S]*\}\s*$/);
                 if (jsonMatch) {
                     try {
                         parsed = JSON.parse(jsonMatch[0]);
                     } catch (e2) {
-                        // try more permissive: find first { and last }
-                        const firstIndex = cleanResponse.indexOf('{');
-                        const lastIndex = cleanResponse.lastIndexOf('}');
-                        if (firstIndex !== -1 && lastIndex !== -1 && lastIndex > firstIndex) {
-                            const candidate = cleanResponse.substring(firstIndex, lastIndex + 1);
+                        // Try find first { and last } and parse
+                        const first = cleanResponse.indexOf('{');
+                        const last = cleanResponse.lastIndexOf('}');
+                        if (first !== -1 && last !== -1 && last > first) {
+                            const candidate = cleanResponse.substring(first, last + 1);
                             parsed = JSON.parse(candidate);
                         } else {
-                            throw new Error('Could not parse JSON from AI response');
+                            throw new Error('Could not extract JSON from AI response');
                         }
                     }
                 } else {
-                    throw new Error('No JSON object found in AI response');
+                    throw new Error('No JSON found in AI response');
                 }
             }
 
-            // Validate required fields
+            // Validate minimal required keys
             if (!parsed || !parsed.summary || typeof parsed.overall_risk_score === 'undefined') {
-                throw new Error('Invalid AI response structure (missing required keys)');
+                throw new Error('Invalid AI response structure (missing summary or overall_risk_score)');
             }
 
-            // Return parsed analysis + raw model output for debugging
-            return Object.assign({}, parsed, { raw_model_output: aiContent });
+            // Attach raw output for debugging
+            parsed.raw_model_output = aiContent;
+
+            return parsed;
 
         } catch (error) {
             lastError = error;
             const status = error.response && error.response.status;
             console.error(`🔴 OpenRouter attempt ${attempt} failed:`, (error.message || error) + (status ? ` (status ${status})` : ''));
-            // if client or parse error, don't retry; if transient (5xx or 429), retry once
+            // retry only on server errors or rate limit
             if (attempt >= MAX_ATTEMPTS || (status && status < 500 && status !== 429)) {
                 break;
             }
-            console.log('⏳ Retrying OpenRouter call...');
-            await sleep(1000 * attempt); // backoff
+            console.log('⏳ Retrying OpenRouter call in 1s...');
+            await sleep(1000 * attempt);
         }
     }
 
-    // FIX: On total failure, log last error and fallback to keyword analysis
+    // On failure, fallback
     console.error('🔴 OpenRouter final error:', lastError && (lastError.stack || lastError.message || lastError));
     console.log('📋 Falling back to keyword analysis');
-    // Optionally include lastError.message inside assumptions for debugging
     const fallback = createFallbackAnalysis(contractText);
-    // attach debug note
-    fallback.assumptions = fallback.assumptions || [];
-    fallback.assumptions.push(`AI_failed: ${lastError ? (lastError.message || String(lastError)) : 'unknown'}`);
+    fallback.assumptions = (fallback.assumptions || []).concat([`AI_failed: ${lastError ? (lastError.message || String(lastError)) : 'unknown'}`]);
     return fallback;
 }
 
@@ -410,41 +405,64 @@ function createFallbackAnalysis(contractText) {
         });
     }
 
-    // Indemnification analysis
-    if (text.includes('indemnif') && (text.includes('all') || text.includes('any') || text.includes('loss') || text.includes('liabil'))) {
+    // Indemnification / Liability analysis
+    if (text.includes('indemnif') || text.includes('indemnity') || (text.includes('liabil') && text.includes('limit'))) {
         riskScore += 1;
         foundIssues.push({
-            clause_type: 'Liability',
-            clause_text: 'Broad indemnification clause detected',
+            clause_type: 'Liability/Indemnity',
+            clause_text: 'Broad indemnity or unlimited liability language detected',
             risk_level: 'Medium',
             risk_score: 70,
             confidence: 'Medium',
-            why_risky_plain: 'You may be responsible for costs even if not at fault',
-            why_risky_legal: 'Unlimited indemnification exposure',
-            market_standard_alternative: 'Limit indemnification to specific breaches only',
-            negotiation_script_friendly: 'Can we limit this to cases where we are actually at fault?',
-            negotiation_script_firm: 'Indemnification should be limited to our direct breaches',
+            why_risky_plain: 'Potential for broad financial exposure in indemnity or unlimited liability',
+            why_risky_legal: 'Creates open-ended indemnification obligations without caps or limitations',
+            market_standard_alternative: 'Limit indemnity to direct damages and breaches and consider caps',
+            negotiation_script_friendly: 'Can we limit indemnity to direct breaches and set reasonable caps?',
+            negotiation_script_firm: 'Indemnity must be limited to our direct breaches with monetary caps',
             priority: 'Important'
         });
     }
 
+     // Governing law / jurisdiction
+    if (text.includes('governed by') || text.includes('governing law') || text.includes('jurisdiction')) {
+        foundIssues.push({
+            clause_type: 'Governing Law',
+            clause_text: 'Governing law/jurisdiction clause present',
+            risk_level: 'Low',
+            risk_score: 45,
+            confidence: 'Medium',
+            why_risky_plain: 'Choice of law affects enforceability and dispute costs',
+            why_risky_legal: 'Consider whether forum selection or arbitration is appropriate',
+            market_standard_alternative: 'Consider mutual jurisdiction or neutral arbitration if needed',
+            negotiation_script_friendly: 'Can we consider a neutral jurisdiction or arbitration?',
+            negotiation_script_firm: 'We request disputes be resolved under our local jurisdiction or via arbitration.',
+            priority: 'Optional'
+        });
+    }
+
+    // If none found, add a default low-risk note
+    const clauses = foundIssues.length > 0 ? foundIssues : [{
+        clause_type: 'General',
+        clause_text: 'Contract reviewed',
+        risk_level: 'Low',
+        risk_score: 50,
+        confidence: 'Low',
+        why_risky_plain: 'No major risks detected in keyword analysis',
+        why_risky_legal: 'Standard contract terms appear present',
+        market_standard_alternative: 'Consider full legal review for comprehensive analysis',
+        negotiation_script_friendly: 'The contract looks fairly standard',
+        negotiation_script_firm: 'We find the terms acceptable as written',
+        priority: 'Optional'
+    }];
+
+    // Compute overall score (FIX: ensure numeric and between 1-10)
+    const totalRisk = Math.min(10, Math.max(1, 5 + (foundIssues.length ? foundIssues.length - 1 : 0)));
+
     return {
         summary: `Keyword-based analysis found ${foundIssues.length} potential risk areas in this contract.`,
-        overall_risk_score: Math.min(riskScore, 10),
+        overall_risk_score: totalRisk,
         overall_confidence: 'Medium',
-        clauses: foundIssues.length > 0 ? foundIssues : [{
-            clause_type: 'General',
-            clause_text: 'Contract reviewed',
-            risk_level: 'Low',
-            risk_score: 50,
-            confidence: 'Low',
-            why_risky_plain: 'No major risks detected in keyword analysis',
-            why_risky_legal: 'Standard contract terms appear present',
-            market_standard_alternative: 'Consider full legal review for comprehensive analysis',
-            negotiation_script_friendly: 'The contract looks fairly standard',
-            negotiation_script_firm: 'We find the terms acceptable as written',
-            priority: 'Optional'
-        }],
+        clauses: clauses,
         top_actions: [
             foundIssues.length > 0 ? 'Address high-priority clauses first' : 'Review contract with legal counsel',
             'Negotiate payment terms if applicable',
@@ -460,6 +478,31 @@ function createFallbackAnalysis(contractText) {
             timestamp_utc: new Date().toISOString()
         }
     };
+}
+
+// Ensure consistent analysis shape (adds defaults if missing) - FIX
+function ensureAnalysisShape(a) {
+    const out = Object.assign({}, a);
+    out.summary = out.summary || 'No summary available';
+    out.overall_risk_score = (typeof out.overall_risk_score !== 'undefined') ? out.overall_risk_score : 5;
+    out.overall_confidence = out.overall_confidence || 'Medium';
+    out.clauses = Array.isArray(out.clauses) ? out.clauses : (out.clause ? [out.clause] : []);
+    if (out.clauses.length === 0) {
+        out.clauses = [{
+            clause_type: 'General',
+            clause_text: 'No specific clauses detected',
+            risk_level: 'Low',
+            risk_score: 50,
+            confidence: 'Low',
+            why_risky_plain: 'No major issues detected',
+            priority: 'Optional'
+        }];
+    }
+    out.top_actions = Array.isArray(out.top_actions) ? out.top_actions : ['Review contract'];
+    out.disclaimer = out.disclaimer || 'This analysis is not legal advice. Consult a licensed attorney.';
+    out.assumptions = Array.isArray(out.assumptions) ? out.assumptions : (out.assumptions ? [out.assumptions] : []);
+    out.meta = out.meta || { jurisdiction_flag: 'US', contract_type: 'General', timestamp_utc: new Date().toISOString() };
+    return out;
 }
 
 // Error handling
