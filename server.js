@@ -127,7 +127,7 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
                 textLength: contractText.length,
                 processedAt: new Date().toISOString(),
                 source: req.file ? 'file' : 'text',
-                model: 'meta-llama/llama-3.1-8b-instruct:free'
+                model: 'meta-llama/llama-3.1-8b-instruct'
             }
         });
 
@@ -254,7 +254,7 @@ Contract: ${promptContract}${truncatedNotice}`;
             const response = await axios.post(
                 'https://openrouter.ai/api/v1/chat/completions',
                 {
-                    model: 'meta-llama/llama-3.1-8b-instruct:free',
+                    model: 'meta-llama/llama-3.1-8b-instruct',
                     messages: [
                         { role: 'system', content: 'You are a contract analysis expert. Respond only with valid JSON.' },
                         { role: 'user', content: prompt }
