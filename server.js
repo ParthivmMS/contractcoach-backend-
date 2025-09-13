@@ -92,7 +92,7 @@ passport.use(new GoogleStrategy({
     callbackURL: "/auth/google/callback"
 }, async (accessToken, refreshToken, profile, done) => {
     try {
-        let user = await User.findOne({
+        let user = await User.findOne({ 
             $or: [
                 { providerId: profile.id, provider: 'google' },
                 { email: profile.emails[0].value }
@@ -123,7 +123,6 @@ passport.use(new GoogleStrategy({
     } catch (error) {
         done(error, null);
     }
-
 }));
 
 // ✅ NEW: LinkedIn OAuth Strategy
@@ -134,7 +133,7 @@ passport.use(new LinkedInStrategy({
     scope: ['r_emailaddress', 'r_liteprofile']
 }, async (accessToken, refreshToken, profile, done) => {
     try {
-        let user = await User.findOne({
+        let user = await User.findOne({ 
             $or: [
                 { providerId: profile.id, provider: 'linkedin' },
                 { email: profile.emails[0].value }
@@ -172,8 +171,8 @@ app.use(cors({
         'https://ai-contractcoach.vercel.app',
         'https://contractcoach.vercel.app',
         'https://parthivmms.github.io',
-        /.vercel.app$/,
-        /.github.io$/,
+        /\.vercel\.app$/,
+        /\.github\.io$/,
         /localhost:\d+$/
     ],
     credentials: true,
@@ -210,7 +209,6 @@ const authenticateToken = (req, res, next) => {
             return res.status(500).json({ error: 'Authentication error' });
         }
     });
-
 };
 
 // ✅ NEW: Check subscription limits
@@ -344,11 +342,10 @@ app.post('/auth/login', async (req, res) => {
         console.error('Login error:', error);
         res.status(500).json({ error: 'Login failed' });
     }
-
 });
 
 // Google OAuth routes
-app.get('/auth/google',
+app.get('/auth/google', 
     passport.authenticate('google', { scope: ['profile', 'email'] })
 );
 
@@ -366,7 +363,6 @@ app.get('/auth/google/callback',
         const frontendURL = process.env.FRONTEND_URL || 'http://localhost:3000';
         res.redirect(`${frontendURL}?token=${token}`);
     }
-
 );
 
 // LinkedIn OAuth routes
@@ -386,7 +382,6 @@ app.get('/auth/linkedin/callback',
         const frontendURL = process.env.FRONTEND_URL || 'http://localhost:3000';
         res.redirect(`${frontendURL}?token=${token}`);
     }
-
 );
 
 // Get current user profile
@@ -538,7 +533,6 @@ app.post('/api/analyze', authenticateToken, checkSubscriptionLimits, upload.sing
             fallback: 'Using keyword-based analysis'
         });
     }
-
 });
 
 // Extract text from uploaded files
@@ -610,32 +604,32 @@ async function analyzeWithOpenRouter(contractText) {
     const prompt = `You are a legal contract expert. Analyze this contract and respond with ONLY valid JSON in this exact format:
 
 {
-"summary": "Brief summary of the contract in 1-2 sentences",
-"overall_risk_score": 7,
-"overall_confidence": "High",
-"clauses": [
-{
-"clause_type": "Payment",
-"clause_text": "Brief excerpt of risky clause",
-"risk_level": "High",
-"risk_score": 85,
-"confidence": "High",
-"why_risky_plain": "Plain English explanation of why this is risky",
-"why_risky_legal": "Legal explanation in one line",
-"market_standard_alternative": "Suggested better clause language",
-"negotiation_script_friendly": "Friendly way to negotiate this",
-"negotiation_script_firm": "Firm way to negotiate this",
-"priority": "Urgent"
-}
-],
-"top_actions": ["Action 1", "Action 2", "Action 3"],
-"disclaimer": "This is not legal advice. Consult a licensed attorney.",
-"assumptions": [],
-"meta": {
-"jurisdiction_flag": "US",
-"contract_type": "Service Agreement",
-"timestamp_utc": "${new Date().toISOString()}"
-}
+  "summary": "Brief summary of the contract in 1-2 sentences",
+  "overall_risk_score": 7,
+  "overall_confidence": "High",
+  "clauses": [
+    {
+      "clause_type": "Payment",
+      "clause_text": "Brief excerpt of risky clause",
+      "risk_level": "High",
+      "risk_score": 85,
+      "confidence": "High",
+      "why_risky_plain": "Plain English explanation of why this is risky",
+      "why_risky_legal": "Legal explanation in one line",
+      "market_standard_alternative": "Suggested better clause language",
+      "negotiation_script_friendly": "Friendly way to negotiate this",
+      "negotiation_script_firm": "Firm way to negotiate this",
+      "priority": "Urgent"
+    }
+  ],
+  "top_actions": ["Action 1", "Action 2", "Action 3"],
+  "disclaimer": "This is not legal advice. Consult a licensed attorney.",
+  "assumptions": [],
+  "meta": {
+    "jurisdiction_flag": "US",
+    "contract_type": "Service Agreement",
+    "timestamp_utc": "${new Date().toISOString()}"
+  }
 }
 
 Focus on: payment terms, termination clauses, IP ownership, liability, confidentiality.
@@ -685,7 +679,7 @@ Contract: ${promptContract}${truncatedNotice}`;
             if (response && response.data) {
                 if (Array.isArray(response.data.choices) && response.data.choices[0]) {
                     aiContent = (response.data.choices[0].message && response.data.choices[0].message.content) ||
-                        response.data.choices[0].text || '';
+                                response.data.choices[0].text || '';
                 } else if (response.data.output) {
                     aiContent = JSON.stringify(response.data.output);
                 } else if (typeof response.data === 'string') {
@@ -834,7 +828,7 @@ function createFallbackAnalysis(contractText) {
         });
     }
 
-    // Governing law / jurisdiction
+     // Governing law / jurisdiction
     if (text.includes('governed by') || text.includes('governing law') || text.includes('jurisdiction')) {
         foundIssues.push({
             clause_type: 'Governing Law',
