@@ -4,6 +4,16 @@ const multer = require('multer');
 const axios = require('axios');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
+// ✅ NEW AUTHENTICATION DEPENDENCIES
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+const passport = require('passport');
+const GoogleStrategy = require('passport-google-oauth20').Strategy;
+const LinkedInStrategy = require('passport-linkedin-oauth2').Strategy;
+const session = require('express-session');
+const MongoStore = require('connect-mongo');
+const mongoose = require('mongoose');
+// ✅ END NEW DEPENDENCIES
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -12,6 +22,149 @@ console.log('🚀 Starting ContractCoach Backend Server...');
 console.log('Environment:', process.env.NODE_ENV || 'development');
 console.log('OpenRouter API Key:', process.env.OPENROUTER_API_KEY ? 'SET ✅' : 'MISSING ❌');
 
+// ✅ NEW: MongoDB Connection
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach', {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+}).then(() => {
+    console.log('✅ MongoDB Connected');
+}).catch(err => {
+    console.error('❌ MongoDB Connection Error:', err);
+});
+
+// ✅ NEW: User Schema
+const userSchema = new mongoose.Schema({
+    email: { type: String, required: true, unique: true },
+    password: { type: String }, // Optional for OAuth users
+    firstName: { type: String, required: true },
+    lastName: { type: String, required: true },
+    provider: { type: String, default: 'local' }, // 'local', 'google', 'linkedin'
+    providerId: { type: String }, // OAuth provider ID
+    avatar: { type: String },
+    isVerified: { type: Boolean, default: false },
+    subscription: {
+        type: { type: String, default: 'free' }, // 'free', 'premium', 'enterprise'
+        expiresAt: Date,
+        contractsAnalyzed: { type: Number, default: 0 },
+        monthlyLimit: { type: Number, default: 3 }
+    },
+    createdAt: { type: Date, default: Date.now },
+    lastLoginAt: { type: Date }
+});
+
+const User = mongoose.model('User', userSchema);
+
+// ✅ NEW: Session Configuration
+app.use(session({
+    secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
+    resave: false,
+    saveUninitialized: false,
+    store: MongoStore.create({
+        mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach'
+    }),
+    cookie: {
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    }
+}));
+
+// ✅ NEW: Passport Configuration
+app.use(passport.initialize());
+app.use(passport.session());
+
+passport.serializeUser((user, done) => {
+    done(null, user._id);
+});
+
+passport.deserializeUser(async (id, done) => {
+    try {
+        const user = await User.findById(id);
+        done(null, user);
+    } catch (error) {
+        done(error, null);
+    }
+});
+
+// ✅ NEW: Google OAuth Strategy
+passport.use(new GoogleStrategy({
+    clientID: process.env.GOOGLE_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+    callbackURL: "/auth/google/callback"
+}, async (accessToken, refreshToken, profile, done) => {
+    try {
+        let user = await User.findOne({
+            $or: [
+                { providerId: profile.id, provider: 'google' },
+                { email: profile.emails[0].value }
+            ]
+        });
+
+        if (user) {
+            // Update existing user
+            user.lastLoginAt = new Date();
+            await user.save();
+            return done(null, user);
+        }
+
+        // Create new user
+        user = new User({
+            email: profile.emails[0].value,
+            firstName: profile.name.givenName,
+            lastName: profile.name.familyName,
+            provider: 'google',
+            providerId: profile.id,
+            avatar: profile.photos[0]?.value,
+            isVerified: true,
+            lastLoginAt: new Date()
+        });
+
+        await user.save();
+        done(null, user);
+    } catch (error) {
+        done(error, null);
+    }
+
+}));
+
+// ✅ NEW: LinkedIn OAuth Strategy
+passport.use(new LinkedInStrategy({
+    clientID: process.env.LINKEDIN_CLIENT_ID,
+    clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
+    callbackURL: "/auth/linkedin/callback",
+    scope: ['r_emailaddress', 'r_liteprofile']
+}, async (accessToken, refreshToken, profile, done) => {
+    try {
+        let user = await User.findOne({
+            $or: [
+                { providerId: profile.id, provider: 'linkedin' },
+                { email: profile.emails[0].value }
+            ]
+        });
+
+        if (user) {
+            user.lastLoginAt = new Date();
+            await user.save();
+            return done(null, user);
+        }
+
+        user = new User({
+            email: profile.emails[0].value,
+            firstName: profile.name.givenName,
+            lastName: profile.name.familyName,
+            provider: 'linkedin',
+            providerId: profile.id,
+            avatar: profile.photos[0]?.value,
+            isVerified: true,
+            lastLoginAt: new Date()
+        });
+
+        await user.save();
+        done(null, user);
+    } catch (error) {
+        done(error, null);
+    }
+}));
+
 // CORS Configuration - Allow your frontend domains
 app.use(cors({
     origin: [
@@ -19,18 +172,245 @@ app.use(cors({
         'https://ai-contractcoach.vercel.app',
         'https://contractcoach.vercel.app',
         'https://parthivmms.github.io',
-        /\.vercel\.app$/,
-        /\.github\.io$/,
+        /.vercel.app$/,
+        /.github.io$/,
         /localhost:\d+$/
     ],
     credentials: true,
     methods: ['GET', 'POST', 'OPTIONS'],
-    // FIX: allow common headers used by fetch/XHR
+    // FIX: allow common headers used by fetch/XHR + auth headers
     allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'Accept']
 }));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// ✅ NEW: Authentication Middleware
+const authenticateToken = (req, res, next) => {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+        return res.status(401).json({ error: 'Access token required' });
+    }
+
+    jwt.verify(token, process.env.JWT_SECRET || 'your-jwt-secret', async (err, decoded) => {
+        if (err) {
+            return res.status(403).json({ error: 'Invalid or expired token' });
+        }
+
+        try {
+            const user = await User.findById(decoded.userId);
+            if (!user) {
+                return res.status(401).json({ error: 'User not found' });
+            }
+            req.user = user;
+            next();
+        } catch (error) {
+            return res.status(500).json({ error: 'Authentication error' });
+        }
+    });
+
+};
+
+// ✅ NEW: Check subscription limits
+const checkSubscriptionLimits = async (req, res, next) => {
+    const user = req.user;
+    const currentMonth = new Date().getMonth();
+    const currentYear = new Date().getFullYear();
+
+    // Reset monthly counter if new month
+    const lastAnalysis = user.subscription.lastAnalysisMonth;
+    if (!lastAnalysis || lastAnalysis.month !== currentMonth || lastAnalysis.year !== currentYear) {
+        user.subscription.contractsAnalyzed = 0;
+        user.subscription.lastAnalysisMonth = { month: currentMonth, year: currentYear };
+        await user.save();
+    }
+
+    // Check limits
+    if (user.subscription.contractsAnalyzed >= user.subscription.monthlyLimit) {
+        return res.status(402).json({
+            error: 'Monthly limit exceeded',
+            message: 'Please upgrade your subscription to analyze more contracts',
+            currentLimit: user.subscription.monthlyLimit,
+            used: user.subscription.contractsAnalyzed
+        });
+    }
+
+    next();
+};
+
+// ✅ NEW: Authentication Routes
+// Register with email/password
+app.post('/auth/register', async (req, res) => {
+    try {
+        const { email, password, firstName, lastName } = req.body;
+
+        if (!email || !password || !firstName || !lastName) {
+            return res.status(400).json({ error: 'All fields are required' });
+        }
+
+        // Check if user exists
+        const existingUser = await User.findOne({ email });
+        if (existingUser) {
+            return res.status(400).json({ error: 'User already exists with this email' });
+        }
+
+        // Hash password
+        const saltRounds = 12;
+        const hashedPassword = await bcrypt.hash(password, saltRounds);
+
+        // Create user
+        const user = new User({
+            email,
+            password: hashedPassword,
+            firstName,
+            lastName,
+            provider: 'local'
+        });
+
+        await user.save();
+
+        // Generate JWT
+        const token = jwt.sign(
+            { userId: user._id, email: user.email },
+            process.env.JWT_SECRET || 'your-jwt-secret',
+            { expiresIn: '7d' }
+        );
+
+        res.status(201).json({
+            success: true,
+            message: 'User registered successfully',
+            user: {
+                id: user._id,
+                email: user.email,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                subscription: user.subscription
+            },
+            token
+        });
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// Login with email/password
+app.post('/auth/login', async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(400).json({ error: 'Email and password are required' });
+        }
+
+        // Find user
+        const user = await User.findOne({ email, provider: 'local' });
+        if (!user) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        // Check password
+        const isValidPassword = await bcrypt.compare(password, user.password);
+        if (!isValidPassword) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+
+        // Update last login
+        user.lastLoginAt = new Date();
+        await user.save();
+
+        // Generate JWT
+        const token = jwt.sign(
+            { userId: user._id, email: user.email },
+            process.env.JWT_SECRET || 'your-jwt-secret',
+            { expiresIn: '7d' }
+        );
+
+        res.json({
+            success: true,
+            message: 'Login successful',
+            user: {
+                id: user._id,
+                email: user.email,
+                firstName: user.firstName,
+                lastName: user.lastName,
+                subscription: user.subscription
+            },
+            token
+        });
+    } catch (error) {
+        console.error('Login error:', error);
+        res.status(500).json({ error: 'Login failed' });
+    }
+
+});
+
+// Google OAuth routes
+app.get('/auth/google',
+    passport.authenticate('google', { scope: ['profile', 'email'] })
+);
+
+app.get('/auth/google/callback',
+    passport.authenticate('google', { failureRedirect: '/login' }),
+    async (req, res) => {
+        // Generate JWT for OAuth user
+        const token = jwt.sign(
+            { userId: req.user._id, email: req.user.email },
+            process.env.JWT_SECRET || 'your-jwt-secret',
+            { expiresIn: '7d' }
+        );
+
+        // Redirect to frontend with token
+        const frontendURL = process.env.FRONTEND_URL || 'http://localhost:3000';
+        res.redirect(`${frontendURL}?token=${token}`);
+    }
+
+);
+
+// LinkedIn OAuth routes
+app.get('/auth/linkedin',
+    passport.authenticate('linkedin')
+);
+
+app.get('/auth/linkedin/callback',
+    passport.authenticate('linkedin', { failureRedirect: '/login' }),
+    async (req, res) => {
+        const token = jwt.sign(
+            { userId: req.user._id, email: req.user.email },
+            process.env.JWT_SECRET || 'your-jwt-secret',
+            { expiresIn: '7d' }
+        );
+
+        const frontendURL = process.env.FRONTEND_URL || 'http://localhost:3000';
+        res.redirect(`${frontendURL}?token=${token}`);
+    }
+
+);
+
+// Get current user profile
+app.get('/auth/me', authenticateToken, (req, res) => {
+    res.json({
+        success: true,
+        user: {
+            id: req.user._id,
+            email: req.user.email,
+            firstName: req.user.firstName,
+            lastName: req.user.lastName,
+            avatar: req.user.avatar,
+            subscription: req.user.subscription,
+            provider: req.user.provider
+        }
+    });
+});
+
+// Logout
+app.post('/auth/logout', (req, res) => {
+    req.logout(() => {
+        res.json({ success: true, message: 'Logged out successfully' });
+    });
+});
 
 // Configure multer for file uploads
 const upload = multer({
@@ -61,7 +441,13 @@ app.get('/', (req, res) => {
         version: '1.0.0',
         endpoints: {
             health: 'GET /health',
-            analyze: 'POST /api/analyze'
+            analyze: 'POST /api/analyze',
+            // ✅ NEW: Auth endpoints
+            register: 'POST /auth/register',
+            login: 'POST /auth/login',
+            googleAuth: 'GET /auth/google',
+            linkedinAuth: 'GET /auth/linkedin',
+            profile: 'GET /auth/me'
         },
         openRouterConnected: !!process.env.OPENROUTER_API_KEY
     });
@@ -74,16 +460,19 @@ app.get('/health', (req, res) => {
         timestamp: new Date().toISOString(),
         uptime: Math.floor(process.uptime()),
         memory: process.memoryUsage(),
-        openRouterConfigured: !!process.env.OPENROUTER_API_KEY
+        openRouterConfigured: !!process.env.OPENROUTER_API_KEY,
+        // ✅ NEW: Auth health checks
+        mongoConnected: mongoose.connection.readyState === 1,
+        authConfigured: !!(process.env.JWT_SECRET && process.env.SESSION_SECRET)
     });
 });
 
-// Main contract analysis endpoint
-app.post('/api/analyze', upload.single('contract'), async (req, res) => {
+// ✅ UPDATED: Main contract analysis endpoint - now requires authentication
+app.post('/api/analyze', authenticateToken, checkSubscriptionLimits, upload.single('contract'), async (req, res) => {
     console.log('📋 Contract analysis request received');
+    console.log('User:', req.user.email);
     console.log('File:', req.file ? `${req.file.originalname} (${req.file.size} bytes)` : 'None');
     console.log('Text length (body):', req.body.text ? req.body.text.length : 0);
-    console.log('Requester IP:', req.ip, 'User-Agent:', req.get('User-Agent'));
 
     try {
         let contractText = '';
@@ -115,6 +504,10 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
         console.log('🤖 Starting AI analysis...');
         const analysis = await analyzeWithOpenRouter(contractText);
 
+        // ✅ NEW: Update user's contract count
+        req.user.subscription.contractsAnalyzed += 1;
+        await req.user.save();
+
         console.log('✅ Analysis completed successfully');
 
         // Ensure consistent response shape (FIX)
@@ -127,7 +520,13 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
                 textLength: contractText.length,
                 processedAt: new Date().toISOString(),
                 source: req.file ? 'file' : 'text',
-                model: 'openai/gpt-4o-mini'
+                model: 'openai/gpt-4o-mini',
+                // ✅ NEW: User analytics
+                user: {
+                    contractsAnalyzed: req.user.subscription.contractsAnalyzed,
+                    monthlyLimit: req.user.subscription.monthlyLimit,
+                    remaining: req.user.subscription.monthlyLimit - req.user.subscription.contractsAnalyzed
+                }
             }
         });
 
@@ -139,6 +538,7 @@ app.post('/api/analyze', upload.single('contract'), async (req, res) => {
             fallback: 'Using keyword-based analysis'
         });
     }
+
 });
 
 // Extract text from uploaded files
@@ -210,32 +610,32 @@ async function analyzeWithOpenRouter(contractText) {
     const prompt = `You are a legal contract expert. Analyze this contract and respond with ONLY valid JSON in this exact format:
 
 {
-  "summary": "Brief summary of the contract in 1-2 sentences",
-  "overall_risk_score": 7,
-  "overall_confidence": "High",
-  "clauses": [
-    {
-      "clause_type": "Payment",
-      "clause_text": "Brief excerpt of risky clause",
-      "risk_level": "High",
-      "risk_score": 85,
-      "confidence": "High",
-      "why_risky_plain": "Plain English explanation of why this is risky",
-      "why_risky_legal": "Legal explanation in one line",
-      "market_standard_alternative": "Suggested better clause language",
-      "negotiation_script_friendly": "Friendly way to negotiate this",
-      "negotiation_script_firm": "Firm way to negotiate this",
-      "priority": "Urgent"
-    }
-  ],
-  "top_actions": ["Action 1", "Action 2", "Action 3"],
-  "disclaimer": "This is not legal advice. Consult a licensed attorney.",
-  "assumptions": [],
-  "meta": {
-    "jurisdiction_flag": "US",
-    "contract_type": "Service Agreement",
-    "timestamp_utc": "${new Date().toISOString()}"
-  }
+"summary": "Brief summary of the contract in 1-2 sentences",
+"overall_risk_score": 7,
+"overall_confidence": "High",
+"clauses": [
+{
+"clause_type": "Payment",
+"clause_text": "Brief excerpt of risky clause",
+"risk_level": "High",
+"risk_score": 85,
+"confidence": "High",
+"why_risky_plain": "Plain English explanation of why this is risky",
+"why_risky_legal": "Legal explanation in one line",
+"market_standard_alternative": "Suggested better clause language",
+"negotiation_script_friendly": "Friendly way to negotiate this",
+"negotiation_script_firm": "Firm way to negotiate this",
+"priority": "Urgent"
+}
+],
+"top_actions": ["Action 1", "Action 2", "Action 3"],
+"disclaimer": "This is not legal advice. Consult a licensed attorney.",
+"assumptions": [],
+"meta": {
+"jurisdiction_flag": "US",
+"contract_type": "Service Agreement",
+"timestamp_utc": "${new Date().toISOString()}"
+}
 }
 
 Focus on: payment terms, termination clauses, IP ownership, liability, confidentiality.
@@ -285,7 +685,7 @@ Contract: ${promptContract}${truncatedNotice}`;
             if (response && response.data) {
                 if (Array.isArray(response.data.choices) && response.data.choices[0]) {
                     aiContent = (response.data.choices[0].message && response.data.choices[0].message.content) ||
-                                response.data.choices[0].text || '';
+                        response.data.choices[0].text || '';
                 } else if (response.data.output) {
                     aiContent = JSON.stringify(response.data.output);
                 } else if (typeof response.data === 'string') {
@@ -434,7 +834,7 @@ function createFallbackAnalysis(contractText) {
         });
     }
 
-     // Governing law / jurisdiction
+    // Governing law / jurisdiction
     if (text.includes('governed by') || text.includes('governing law') || text.includes('jurisdiction')) {
         foundIssues.push({
             clause_type: 'Governing Law',
@@ -539,7 +939,7 @@ app.use('*', (req, res) => {
     res.status(404).json({
         error: 'Not found',
         message: `${req.method} ${req.originalUrl} not found`,
-        endpoints: ['GET /', 'GET /health', 'POST /api/analyze']
+        endpoints: ['GET /', 'GET /health', 'POST /api/analyze', 'POST /auth/login', 'POST /auth/register']
     });
 });
 
@@ -548,5 +948,6 @@ app.listen(PORT, () => {
     console.log(`🌐 Server running on port ${PORT}`);
     console.log(`🔗 Health: https://contractcoach-backend.onrender.com/health`);
     console.log(`📋 API: https://contractcoach-backend.onrender.com/api/analyze`);
+    console.log('🔐 Auth: Login, Register, Google & LinkedIn OAuth ready');
     console.log('🚀 Ready for contract analysis!');
 });
