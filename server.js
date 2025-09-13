@@ -61,7 +61,92 @@ app.use(session({
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({
-        mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach'
+// Guarded Google OAuth strategy
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    passport.use(new GoogleStrategy({
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: "/auth/google/callback"
+    }, async (accessToken, refreshToken, profile, done) => {
+        try {
+            let user = await User.findOne({ 
+                $or: [
+                    { providerId: profile.id, provider: 'google' },
+                    { email: profile.emails[0].value }
+                ]
+            });
+
+            if (user) {
+                // Update existing user
+                user.lastLoginAt = new Date();
+                await user.save();
+                return done(null, user);
+            }
+
+            // Create new user
+            user = new User({
+                email: profile.emails[0].value,
+                firstName: profile.name.givenName,
+                lastName: profile.name.familyName,
+                provider: 'google',
+                providerId: profile.id,
+                avatar: profile.photos[0]?.value,
+                isVerified: true,
+                lastLoginAt: new Date()
+            });
+
+            await user.save();
+            done(null, user);
+        } catch (error) {
+            done(error, null);
+        }
+    }));
+} else {
+    console.warn('⚠️ Google OAuth not configured (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET missing). Google login will be disabled.');
+}
+
+// Guarded LinkedIn OAuth strategy
+if (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET) {
+    passport.use(new LinkedInStrategy({
+        clientID: process.env.LINKEDIN_CLIENT_ID,
+        clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
+        callbackURL: "/auth/linkedin/callback",
+        scope: ['r_emailaddress', 'r_liteprofile']
+    }, async (accessToken, refreshToken, profile, done) => {
+        try {
+            let user = await User.findOne({ 
+                $or: [
+                    { providerId: profile.id, provider: 'linkedin' },
+                    { email: profile.emails[0].value }
+                ]
+            });
+
+            if (user) {
+                user.lastLoginAt = new Date();
+                await user.save();
+                return done(null, user);
+            }
+
+            user = new User({
+                email: profile.emails[0].value,
+                firstName: profile.name.givenName,
+                lastName: profile.name.familyName,
+                provider: 'linkedin',
+                providerId: profile.id,
+                avatar: profile.photos[0]?.value,
+                isVerified: true,
+                lastLoginAt: new Date()
+            });
+
+            await user.save();
+            done(null, user);
+        } catch (error) {
+            done(error, null);
+        }
+    }));
+} else {
+    console.warn('⚠️ LinkedIn OAuth not configured (LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET missing). LinkedIn login will be disabled.');
+}        mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach'
     }),
     cookie: {
         secure: process.env.NODE_ENV === 'production',
@@ -86,84 +171,6 @@ passport.deserializeUser(async (id, done) => {
     }
 });
 
-// ✅ NEW: Google OAuth Strategy
-passport.use(new GoogleStrategy({
-    clientID: process.env.GOOGLE_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-    callbackURL: "/auth/google/callback"
-}, async (accessToken, refreshToken, profile, done) => {
-    try {
-        let user = await User.findOne({ 
-            $or: [
-                { providerId: profile.id, provider: 'google' },
-                { email: profile.emails[0].value }
-            ]
-        });
-
-        if (user) {
-            // Update existing user
-            user.lastLoginAt = new Date();
-            await user.save();
-            return done(null, user);
-        }
-
-        // Create new user
-        user = new User({
-            email: profile.emails[0].value,
-            firstName: profile.name.givenName,
-            lastName: profile.name.familyName,
-            provider: 'google',
-            providerId: profile.id,
-            avatar: profile.photos[0]?.value,
-            isVerified: true,
-            lastLoginAt: new Date()
-        });
-
-        await user.save();
-        done(null, user);
-    } catch (error) {
-        done(error, null);
-    }
-}));
-
-// ✅ NEW: LinkedIn OAuth Strategy
-passport.use(new LinkedInStrategy({
-    clientID: process.env.LINKEDIN_CLIENT_ID,
-    clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
-    callbackURL: "/auth/linkedin/callback",
-    scope: ['r_emailaddress', 'r_liteprofile']
-}, async (accessToken, refreshToken, profile, done) => {
-    try {
-        let user = await User.findOne({ 
-            $or: [
-                { providerId: profile.id, provider: 'linkedin' },
-                { email: profile.emails[0].value }
-            ]
-        });
-
-        if (user) {
-            user.lastLoginAt = new Date();
-            await user.save();
-            return done(null, user);
-        }
-
-        user = new User({
-            email: profile.emails[0].value,
-            firstName: profile.name.givenName,
-            lastName: profile.name.familyName,
-            provider: 'linkedin',
-            providerId: profile.id,
-            avatar: profile.photos[0]?.value,
-            isVerified: true,
-            lastLoginAt: new Date()
-        });
-
-        await user.save();
-        done(null, user);
-    } catch (error) {
-        done(error, null);
-    }
-}));
 
 // CORS Configuration - Allow your frontend domains
 app.use(cors({
