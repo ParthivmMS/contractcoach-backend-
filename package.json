@@ -24,8 +24,7 @@
     "passport-linkedin-oauth2": "^2.0.0",
     "express-session": "^1.17.3",
     "connect-mongo": "^4.6.0",
-    "mongoose": "^7.2.0",
-    "dotenv": "^16.0.3"
+    "mongoose": "^7.0.4"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"
