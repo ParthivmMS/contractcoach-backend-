@@ -76,6 +76,25 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
                 ]
             });
 
+// --------------------
+// Passport OAuth strategies (moved outside session object)
+// --------------------
+
+// Guarded Google OAuth strategy
+if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
+    passport.use(new GoogleStrategy({
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: "/auth/google/callback"
+    }, async (accessToken, refreshToken, profile, done) => {
+        try {
+            let user = await User.findOne({ 
+                $or: [
+                    { providerId: profile.id, provider: 'google' },
+                    { email: profile.emails[0].value }
+                ]
+            });
+
             if (user) {
                 // Update existing user
                 user.lastLoginAt = new Date();
@@ -127,10 +146,14 @@ if (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET) {
                 return done(null, user);
             }
 
+            const email = profile.emails[0].value;
+            const givenName = profile.name && profile.name.givenName ? profile.name.givenName : '';
+            const familyName = profile.name && profile.name.familyName ? profile.name.familyName : '';
+
             user = new User({
-                email: profile.emails[0].value,
-                firstName: profile.name.givenName,
-                lastName: profile.name.familyName,
+                email,
+                firstName: givenName || '',
+                lastName: familyName || '',
                 provider: 'linkedin',
                 providerId: profile.id,
                 avatar: profile.photos[0]?.value,
@@ -146,7 +169,17 @@ if (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET) {
     }));
 } else {
     console.warn('⚠️ LinkedIn OAuth not configured (LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET missing). LinkedIn login will be disabled.');
-}        mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach'
+}
+
+// --------------------
+// Session configuration (fixed)
+// --------------------
+app.use(session({
+    secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
+    resave: false,
+    saveUninitialized: false,
+    store: MongoStore.create({
+        mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach'
     }),
     cookie: {
         secure: process.env.NODE_ENV === 'production',
@@ -156,7 +189,32 @@ if (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET) {
 
 // ✅ NEW: Passport Configuration
 app.use(passport.initialize());
-app.use(passport.session());
+app.use(passport.session());            if (user) {
+                // Update existing user
+                user.lastLoginAt = new Date();
+                await user.save();
+                return done(null, user);
+            }
+
+            // Create new user
+            user = new User({
+                email: profile.emails[0].value,
+                firstName: profile.name.givenName,
+                lastName: profile.name.familyName,
+                provider: 'google',
+                providerId: profile.id,
+                avatar: profile.photos[0]?.value,
+                isVerified: true,
+                lastLoginAt: new Date()
+            });
+
+            await user.save();
+            done(null, user);
+        } catch (error) {
+            done(error, null);
+        }
+    }));
+
 
 passport.serializeUser((user, done) => {
     done(null, user._id);
