@@ -61,7 +61,32 @@ app.use(session({
     resave: false,
     saveUninitialized: false,
     store: MongoStore.create({
-// Guarded Google OAuth strategy
+        mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach'
+    }),
+    cookie: {
+        secure: process.env.NODE_ENV === 'production',
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    }
+}));
+
+// ✅ NEW: Passport Configuration
+app.use(passport.initialize());
+app.use(passport.session());
+
+passport.serializeUser((user, done) => {
+    done(null, user._id);
+});
+
+passport.deserializeUser(async (id, done) => {
+    try {
+        const user = await User.findById(id);
+        done(null, user);
+    } catch (error) {
+        done(error, null);
+    }
+});
+
+// ✅ NEW: Google OAuth Strategy
 if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
     passport.use(new GoogleStrategy({
         clientID: process.env.GOOGLE_CLIENT_ID,
