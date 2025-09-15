@@ -224,40 +224,55 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// ✅ NEW: Check subscription limits
+// ---------- REPLACE checkSubscriptionLimits ----------
 const checkSubscriptionLimits = async (req, res, next) => {
-    const user = req.user;
-    const currentMonth = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
+    try {
+        const user = req.user;
+        const now = new Date();
+        const currentMonth = now.getMonth();
+        const currentYear = now.getFullYear();
 
-    // Initialize lastAnalysisMonth if missing
-    if (!user.subscription.lastAnalysisMonth) {
-        user.subscription.lastAnalysisMonth = { month: currentMonth, year: currentYear };
-        user.subscription.contractsAnalyzed = 0;
-        await user.save();
+        // Initialize subscription fields if missing
+        if (!user.subscription) {
+            user.subscription = {
+                contractsAnalyzed: 0,
+                monthlyLimit: 3,
+                lastAnalysisMonth: { month: currentMonth, year: currentYear }
+            };
+            await user.save();
+        }
+
+        if (!user.subscription.lastAnalysisMonth) {
+            user.subscription.lastAnalysisMonth = { month: currentMonth, year: currentYear };
+            user.subscription.contractsAnalyzed = user.subscription.contractsAnalyzed || 0;
+            await user.save();
+        }
+
+        // Reset monthly counter if month changed
+        const last = user.subscription.lastAnalysisMonth;
+        if (last.month !== currentMonth || last.year !== currentYear) {
+            user.subscription.contractsAnalyzed = 0;
+            user.subscription.lastAnalysisMonth = { month: currentMonth, year: currentYear };
+            await user.save();
+        }
+
+        // Enforce limit
+        if ((user.subscription.contractsAnalyzed || 0) >= (user.subscription.monthlyLimit || 3)) {
+            return res.status(402).json({
+                error: 'Monthly limit exceeded',
+                message: 'Please upgrade your subscription to analyze more contracts',
+                currentLimit: user.subscription.monthlyLimit,
+                used: user.subscription.contractsAnalyzed
+            });
+        }
+
+        next();
+    } catch (err) {
+        console.error('checkSubscriptionLimits error:', err);
+        return res.status(500).json({ error: 'Internal server error' });
     }
-
-    // Reset monthly counter if new month
-    const lastAnalysis = user.subscription.lastAnalysisMonth;
-    if (lastAnalysis.month !== currentMonth || lastAnalysis.year !== currentYear) {
-        user.subscription.contractsAnalyzed = 0;
-        user.subscription.lastAnalysisMonth = { month: currentMonth, year: currentYear };
-        await user.save();
-    }
-
-    if (user.subscription.contractsAnalyzed >= user.subscription.monthlyLimit) {
-        return res.status(402).json({
-            error: 'Monthly limit exceeded',
-            message: 'Please upgrade your subscription to analyze more contracts',
-            currentLimit: user.subscription.monthlyLimit,
-            used: user.subscription.contractsAnalyzed
-        });
-    }
-
-    next();
-if (!email || !password) {
-    return res.status(400).json({ error: 'All fields are required' });
-}
+};
+// ---------- END checkSubscriptionLimits ----------
 
         // Check if user exists
         const existingUser = await User.findOne({ email });
