@@ -321,45 +321,37 @@ const checkSubscriptionLimits = async (req, res, next) => {
 });
 
 // ---------- REPLACE /auth/login route ----------
-app.post('/auth/login', async (req, res) => {
+app.post('/auth/register', async (req, res) => {
     try {
-        const { email, password } = req.body;
+        const { email, password, firstName, lastName } = req.body;
 
-        if (!email || !password) {
+        if (!email || !password || !firstName || !lastName) {
             return res.status(400).json({ error: 'All fields are required' });
         }
 
-        const user = await User.findOne({ email: email.toLowerCase() });
-        if (!user) {
-            return res.status(401).json({ error: 'Invalid credentials' });
+        const existingUser = await User.findOne({ email: email.toLowerCase() });
+
+        if (existingUser) {
+            return res.status(409).json({ error: 'Email already in use' });
         }
 
-        // If you're using bcrypt (example)
-        const validPassword = await bcrypt.compare(password, user.password);
-        if (!validPassword) {
-            return res.status(401).json({ error: 'Invalid credentials' });
-        }
+        const hashedPassword = await bcrypt.hash(password, 10);
 
-        // Example session login (adjust depending on your logic)
-        req.logIn(user, (err) => {
-            if (err) {
-                console.error('req.logIn error:', err);
-                return res.status(500).json({ error: 'Login failed' });
-            }
-            // send back safe user info (avoid sending password)
-            const safeUser = {
-                id: user._id,
-                email: user.email,
-                firstName: user.firstName,
-                lastName: user.lastName,
-                subscription: user.subscription || {}
-            };
-            return res.json({ message: 'Login successful', user: safeUser });
+        const newUser = new User({
+            email: email.toLowerCase(),
+            password: hashedPassword,
+            firstName,
+            lastName,
+            provider: 'local',
+            subscription: { contractsAnalyzed: 0, monthlyLimit: 3 }
         });
 
-    } catch (err) {
-        console.error('/auth/login error:', err);
-        return res.status(500).json({ error: 'Internal server error' });
+        await newUser.save();
+
+        res.status(201).json({ message: 'User registered successfully' });
+    } catch (error) {
+        console.error('Register error:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 // ---------- END /auth/login route ----------
