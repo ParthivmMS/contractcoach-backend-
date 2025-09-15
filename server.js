@@ -321,6 +321,7 @@ const checkSubscriptionLimits = async (req, res, next) => {
 });
 
 // ---------- REPLACE /auth/login route ----------
+// ---------- FINAL FIXED /auth/register route ----------
 app.post('/auth/register', async (req, res) => {
     try {
         const { email, password, firstName, lastName } = req.body;
@@ -330,7 +331,6 @@ app.post('/auth/register', async (req, res) => {
         }
 
         const existingUser = await User.findOne({ email: email.toLowerCase() });
-
         if (existingUser) {
             return res.status(409).json({ error: 'Email already in use' });
         }
@@ -354,6 +354,7 @@ app.post('/auth/register', async (req, res) => {
         res.status(500).json({ error: 'Internal server error' });
     }
 });
+// ---------- END FINAL FIXED /auth/register route ----------
 // ---------- END /auth/login route ----------
 
 // Google OAuth routes
