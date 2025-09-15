@@ -255,9 +255,9 @@ const checkSubscriptionLimits = async (req, res, next) => {
     }
 
     next();
-};
-            return res.status(400).json({ error: 'All fields are required' });
-        }
+if (!email || !password) {
+    return res.status(400).json({ error: 'All fields are required' });
+}
 
         // Check if user exists
         const existingUser = await User.findOne({ email });
