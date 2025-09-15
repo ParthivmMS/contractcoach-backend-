@@ -320,55 +320,49 @@ const checkSubscriptionLimits = async (req, res, next) => {
     }
 });
 
-// Login with email/password
+// ---------- REPLACE /auth/login route ----------
 app.post('/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
 
         if (!email || !password) {
-            return res.status(400).json({ error: 'Email and password are required' });
+            return res.status(400).json({ error: 'All fields are required' });
         }
 
-        // Find user
-        const user = await User.findOne({ email, provider: 'local' });
+        const user = await User.findOne({ email: email.toLowerCase() });
         if (!user) {
-            return res.status(401).json({ error: 'Invalid email or password' });
+            return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        // Check password
-        const isValidPassword = await bcrypt.compare(password, user.password);
-        if (!isValidPassword) {
-            return res.status(401).json({ error: 'Invalid email or password' });
+        // If you're using bcrypt (example)
+        const validPassword = await bcrypt.compare(password, user.password);
+        if (!validPassword) {
+            return res.status(401).json({ error: 'Invalid credentials' });
         }
 
-        // Update last login
-        user.lastLoginAt = new Date();
-        await user.save();
-
-        // Generate JWT
-        const token = jwt.sign(
-            { userId: user._id, email: user.email },
-            process.env.JWT_SECRET || 'your-jwt-secret',
-            { expiresIn: '7d' }
-        );
-
-        res.json({
-            success: true,
-            message: 'Login successful',
-            user: {
+        // Example session login (adjust depending on your logic)
+        req.logIn(user, (err) => {
+            if (err) {
+                console.error('req.logIn error:', err);
+                return res.status(500).json({ error: 'Login failed' });
+            }
+            // send back safe user info (avoid sending password)
+            const safeUser = {
                 id: user._id,
                 email: user.email,
                 firstName: user.firstName,
                 lastName: user.lastName,
-                subscription: user.subscription
-            },
-            token
+                subscription: user.subscription || {}
+            };
+            return res.json({ message: 'Login successful', user: safeUser });
         });
-    } catch (error) {
-        console.error('Login error:', error);
-        res.status(500).json({ error: 'Login failed' });
+
+    } catch (err) {
+        console.error('/auth/login error:', err);
+        return res.status(500).json({ error: 'Internal server error' });
     }
 });
+// ---------- END /auth/login route ----------
 
 // Google OAuth routes
 app.get('/auth/google', 
