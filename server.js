@@ -225,21 +225,12 @@ const authenticateToken = (req, res, next) => {
 };
 
 // ✅ NEW: Check subscription limits
-
-
-// ✅ NEW: Authentication Routes
-// Register with email/password
-app.post('/auth/register', async (req, res) => {
-    try {
-        const { email, password, firstName, lastName } = req.body;
-
-        if (!email || !password || !firstName || !lastName) {
-            return res.status(40const checkSubscriptionLimits = async (req, res, next) => {
+const checkSubscriptionLimits = async (req, res, next) => {
     const user = req.user;
     const currentMonth = new Date().getMonth();
     const currentYear = new Date().getFullYear();
 
-    // Fix: Initialize lastAnalysisMonth if missing
+    // Initialize lastAnalysisMonth if missing
     if (!user.subscription.lastAnalysisMonth) {
         user.subscription.lastAnalysisMonth = { month: currentMonth, year: currentYear };
         user.subscription.contractsAnalyzed = 0;
