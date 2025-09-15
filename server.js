@@ -302,31 +302,58 @@ const authenticateToken = (req, res, next) => {
     });
 };
 
-// ✅ NEW: Check subscription limits
+// Fixed Subscription Limits Middleware
 const checkSubscriptionLimits = async (req, res, next) => {
-    const user = req.user;
-    const currentMonth = new Date().getMonth();
-    const currentYear = new Date().getFullYear();
+    try {
+        if (!req.user) {
+            return res.status(401).json({ message: 'Authentication required' });
+        }
 
-    // Reset monthly counter if new month
-    const lastAnalysis = user.subscription.lastAnalysisMonth;
-    if (!lastAnalysis || lastAnalysis.month !== currentMonth || lastAnalysis.year !== currentYear) {
-        user.subscription.contractsAnalyzed = 0;
-        user.subscription.lastAnalysisMonth = { month: currentMonth, year: currentYear };
-        await user.save();
+        const user = await User.findById(req.user._id);
+        if (!user) {
+            return res.status(404).json({ message: 'User not found' });
+        }
+
+        const currentMonth = new Date().getMonth() + 1;
+        const currentYear = new Date().getFullYear();
+
+        // Initialize subscription object if missing
+        if (!user.subscription) {
+            user.subscription = {
+                contractsAnalyzed: 0,
+                monthlyLimit: 3,
+                lastAnalysisMonth: currentMonth,
+                lastAnalysisYear: currentYear
+            };
+            await user.save();
+        }
+
+        // Reset counter if month has changed
+        if (user.subscription.lastAnalysisMonth !== currentMonth || 
+            user.subscription.lastAnalysisYear !== currentYear) {
+            user.subscription.contractsAnalyzed = 0;
+            user.subscription.lastAnalysisMonth = currentMonth;
+            user.subscription.lastAnalysisYear = currentYear;
+            await user.save();
+        }
+
+        // Check if user has exceeded monthly limit
+        if (user.subscription.contractsAnalyzed >= user.subscription.monthlyLimit) {
+            return res.status(402).json({ 
+                message: 'Monthly analysis limit reached',
+                limit: user.subscription.monthlyLimit,
+                analyzed: user.subscription.contractsAnalyzed,
+                resetDate: new Date(currentYear, currentMonth, 1).toISOString()
+            });
+        }
+
+        req.user = user;
+        next();
+
+    } catch (error) {
+        console.error('Subscription check error:', error);
+        res.status(500).json({ message: 'Error checking subscription limits' });
     }
-
-    // Check limits
-    if (user.subscription.contractsAnalyzed >= user.subscription.monthlyLimit) {
-        return res.status(402).json({
-            error: 'Monthly limit exceeded',
-            message: 'Please upgrade your subscription to analyze more contracts',
-            currentLimit: user.subscription.monthlyLimit,
-            used: user.subscription.contractsAnalyzed
-        });
-    }
-
-    next();
 };
 
 // ✅ NEW: Authentication Routes
