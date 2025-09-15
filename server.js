@@ -5,7 +5,6 @@ const multer = require('multer');
 const axios = require('axios');
 const pdf = require('pdf-parse');
 const mammoth = require('mammoth');
-// ✅ NEW AUTHENTICATION DEPENDENCIES
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const passport = require('passport');
@@ -14,7 +13,6 @@ const LinkedInStrategy = require('passport-linkedin-oauth2').Strategy;
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
 const mongoose = require('mongoose');
-// ✅ END NEW DEPENDENCIES
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,7 +21,7 @@ console.log('🚀 Starting ContractCoach Backend Server...');
 console.log('Environment:', process.env.NODE_ENV || 'development');
 console.log('OpenRouter API Key:', process.env.OPENROUTER_API_KEY ? 'SET ✅' : 'MISSING ❌');
 
-// ✅ NEW: MongoDB Connection
+// MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach', {
     useNewUrlParser: true,
     useUnifiedTopology: true,
@@ -33,21 +31,23 @@ mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/contractc
     console.error('❌ MongoDB Connection Error:', err);
 });
 
-// ✅ NEW: User Schema
+// User Schema
 const userSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
-    password: { type: String }, // Optional for OAuth users
+    password: { type: String },
     firstName: { type: String, required: true },
     lastName: { type: String, required: true },
-    provider: { type: String, default: 'local' }, // 'local', 'google', 'linkedin'
-    providerId: { type: String }, // OAuth provider ID
+    provider: { type: String, default: 'local' },
+    providerId: { type: String },
     avatar: { type: String },
     isVerified: { type: Boolean, default: false },
     subscription: {
-        type: { type: String, default: 'free' }, // 'free', 'premium', 'enterprise'
+        type: { type: String, default: 'free' },
         expiresAt: Date,
         contractsAnalyzed: { type: Number, default: 0 },
-        monthlyLimit: { type: Number, default: 3 }
+        monthlyLimit: { type: Number, default: 3 },
+        lastAnalysisMonth: { type: Number },
+        lastAnalysisYear: { type: Number }
     },
     createdAt: { type: Date, default: Date.now },
     lastLoginAt: { type: Date }
@@ -55,7 +55,7 @@ const userSchema = new mongoose.Schema({
 
 const User = mongoose.model('User', userSchema);
 
-// ✅ NEW: Session Configuration
+// Session Configuration
 app.use(session({
     secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
     resave: false,
@@ -65,11 +65,11 @@ app.use(session({
     }),
     cookie: {
         secure: process.env.NODE_ENV === 'production',
-        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+        maxAge: 7 * 24 * 60 * 60 * 1000
     }
 }));
 
-// ✅ NEW: Passport Configuration
+// Passport Configuration
 app.use(passport.initialize());
 app.use(passport.session());
 
@@ -86,31 +86,12 @@ passport.deserializeUser(async (id, done) => {
     }
 });
 
-// ✅ NEW: Google OAuth Strategy
+// Google OAuth Strategy
 if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
     passport.use(new GoogleStrategy({
         clientID: process.env.GOOGLE_CLIENT_ID,
         clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        callbackURL: "/auth/google/callback"
-    }, async (accessToken, refreshToken, profile, done) => {
-        try {
-            let user = await User.findOne({ 
-                $or: [
-                    { providerId: profile.id, provider: 'google' },
-                    { email: profile.emails[0].value }
-                ]
-            });
-
-// --------------------
-// Passport OAuth strategies (moved outside session object)
-// --------------------
-
-// Guarded Google OAuth strategy
-if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
-    passport.use(new GoogleStrategy({
-        clientID: process.env.GOOGLE_CLIENT_ID,
-        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-        callbackURL: "/auth/google/callback"
+        callbackURL: "https://contractcoach-backend.onrender.com/auth/google/callback"
     }, async (accessToken, refreshToken, profile, done) => {
         try {
             let user = await User.findOne({ 
@@ -121,13 +102,11 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
             });
 
             if (user) {
-                // Update existing user
                 user.lastLoginAt = new Date();
                 await user.save();
                 return done(null, user);
             }
 
-            // Create new user
             user = new User({
                 email: profile.emails[0].value,
                 firstName: profile.name.givenName,
@@ -146,15 +125,15 @@ if (process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET) {
         }
     }));
 } else {
-    console.warn('⚠️ Google OAuth not configured (GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET missing). Google login will be disabled.');
+    console.warn('⚠️ Google OAuth not configured');
 }
 
-// Guarded LinkedIn OAuth strategy
+// LinkedIn OAuth Strategy
 if (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET) {
     passport.use(new LinkedInStrategy({
         clientID: process.env.LINKEDIN_CLIENT_ID,
         clientSecret: process.env.LINKEDIN_CLIENT_SECRET,
-        callbackURL: "/auth/linkedin/callback",
+        callbackURL: "https://contractcoach-backend.onrender.com/auth/linkedin/callback",
         scope: ['r_emailaddress', 'r_liteprofile']
     }, async (accessToken, refreshToken, profile, done) => {
         try {
@@ -172,13 +151,13 @@ if (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET) {
             }
 
             const email = profile.emails[0].value;
-            const givenName = profile.name && profile.name.givenName ? profile.name.givenName : '';
-            const familyName = profile.name && profile.name.familyName ? profile.name.familyName : '';
+            const givenName = profile.name?.givenName || '';
+            const familyName = profile.name?.familyName || '';
 
             user = new User({
                 email,
-                firstName: givenName || '',
-                lastName: familyName || '',
+                firstName: givenName,
+                lastName: familyName,
                 provider: 'linkedin',
                 providerId: profile.id,
                 avatar: profile.photos[0]?.value,
@@ -193,69 +172,10 @@ if (process.env.LINKEDIN_CLIENT_ID && process.env.LINKEDIN_CLIENT_SECRET) {
         }
     }));
 } else {
-    console.warn('⚠️ LinkedIn OAuth not configured (LINKEDIN_CLIENT_ID / LINKEDIN_CLIENT_SECRET missing). LinkedIn login will be disabled.');
+    console.warn('⚠️ LinkedIn OAuth not configured');
 }
 
-// --------------------
-// Session configuration (fixed)
-// --------------------
-app.use(session({
-    secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
-    resave: false,
-    saveUninitialized: false,
-    store: MongoStore.create({
-        mongoUrl: process.env.MONGODB_URI || 'mongodb://localhost:27017/contractcoach'
-    }),
-    cookie: {
-        secure: process.env.NODE_ENV === 'production',
-        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
-    }
-}));
-
-// ✅ NEW: Passport Configuration
-app.use(passport.initialize());
-app.use(passport.session());            if (user) {
-                // Update existing user
-                user.lastLoginAt = new Date();
-                await user.save();
-                return done(null, user);
-            }
-
-            // Create new user
-            user = new User({
-                email: profile.emails[0].value,
-                firstName: profile.name.givenName,
-                lastName: profile.name.familyName,
-                provider: 'google',
-                providerId: profile.id,
-                avatar: profile.photos[0]?.value,
-                isVerified: true,
-                lastLoginAt: new Date()
-            });
-
-            await user.save();
-            done(null, user);
-        } catch (error) {
-            done(error, null);
-        }
-    }));
-
-
-passport.serializeUser((user, done) => {
-    done(null, user._id);
-});
-
-passport.deserializeUser(async (id, done) => {
-    try {
-        const user = await User.findById(id);
-        done(null, user);
-    } catch (error) {
-        done(error, null);
-    }
-});
-
-
-// CORS Configuration - Allow your frontend domains
+// CORS Configuration
 app.use(cors({
     origin: [
         'http://localhost:3000',
@@ -268,14 +188,13 @@ app.use(cors({
     ],
     credentials: true,
     methods: ['GET', 'POST', 'OPTIONS'],
-    // FIX: allow common headers used by fetch/XHR + auth headers
     allowedHeaders: ['Content-Type', 'Authorization', 'Origin', 'Accept']
 }));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// ✅ NEW: Authentication Middleware
+// Authentication Middleware
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
@@ -356,8 +275,7 @@ const checkSubscriptionLimits = async (req, res, next) => {
     }
 };
 
-// ✅ NEW: Authentication Routes
-// Register with email/password
+// Authentication Routes
 app.post('/auth/register', async (req, res) => {
     try {
         const { email, password, firstName, lastName } = req.body;
@@ -366,17 +284,14 @@ app.post('/auth/register', async (req, res) => {
             return res.status(400).json({ error: 'All fields are required' });
         }
 
-        // Check if user exists
         const existingUser = await User.findOne({ email });
         if (existingUser) {
             return res.status(400).json({ error: 'User already exists with this email' });
         }
 
-        // Hash password
         const saltRounds = 12;
         const hashedPassword = await bcrypt.hash(password, saltRounds);
 
-        // Create user
         const user = new User({
             email,
             password: hashedPassword,
@@ -387,7 +302,6 @@ app.post('/auth/register', async (req, res) => {
 
         await user.save();
 
-        // Generate JWT
         const token = jwt.sign(
             { userId: user._id, email: user.email },
             process.env.JWT_SECRET || 'your-jwt-secret',
@@ -412,7 +326,6 @@ app.post('/auth/register', async (req, res) => {
     }
 });
 
-// Login with email/password
 app.post('/auth/login', async (req, res) => {
     try {
         const { email, password } = req.body;
@@ -421,23 +334,19 @@ app.post('/auth/login', async (req, res) => {
             return res.status(400).json({ error: 'Email and password are required' });
         }
 
-        // Find user
         const user = await User.findOne({ email, provider: 'local' });
         if (!user) {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
 
-        // Check password
         const isValidPassword = await bcrypt.compare(password, user.password);
         if (!isValidPassword) {
             return res.status(401).json({ error: 'Invalid email or password' });
         }
 
-        // Update last login
         user.lastLoginAt = new Date();
         await user.save();
 
-        // Generate JWT
         const token = jwt.sign(
             { userId: user._id, email: user.email },
             process.env.JWT_SECRET || 'your-jwt-secret',
@@ -470,14 +379,12 @@ app.get('/auth/google',
 app.get('/auth/google/callback',
     passport.authenticate('google', { failureRedirect: '/login' }),
     async (req, res) => {
-        // Generate JWT for OAuth user
         const token = jwt.sign(
             { userId: req.user._id, email: req.user.email },
             process.env.JWT_SECRET || 'your-jwt-secret',
             { expiresIn: '7d' }
         );
 
-        // Redirect to frontend with token
         const frontendURL = process.env.FRONTEND_URL || 'http://localhost:3000';
         res.redirect(`${frontendURL}?token=${token}`);
     }
@@ -502,7 +409,6 @@ app.get('/auth/linkedin/callback',
     }
 );
 
-// Get current user profile
 app.get('/auth/me', authenticateToken, (req, res) => {
     res.json({
         success: true,
@@ -518,7 +424,6 @@ app.get('/auth/me', authenticateToken, (req, res) => {
     });
 });
 
-// Logout
 app.post('/auth/logout', (req, res) => {
     req.logout(() => {
         res.json({ success: true, message: 'Logged out successfully' });
@@ -528,7 +433,7 @@ app.post('/auth/logout', (req, res) => {
 // Configure multer for file uploads
 const upload = multer({
     storage: multer.memoryStorage(),
-    limits: { fileSize: 30 * 1024 * 1024 }, // 30MB
+    limits: { fileSize: 30 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
         const allowed = [
             'application/pdf',
@@ -555,7 +460,6 @@ app.get('/', (req, res) => {
         endpoints: {
             health: 'GET /health',
             analyze: 'POST /api/analyze',
-            // ✅ NEW: Auth endpoints
             register: 'POST /auth/register',
             login: 'POST /auth/login',
             googleAuth: 'GET /auth/google',
@@ -574,13 +478,12 @@ app.get('/health', (req, res) => {
         uptime: Math.floor(process.uptime()),
         memory: process.memoryUsage(),
         openRouterConfigured: !!process.env.OPENROUTER_API_KEY,
-        // ✅ NEW: Auth health checks
         mongoConnected: mongoose.connection.readyState === 1,
         authConfigured: !!(process.env.JWT_SECRET && process.env.SESSION_SECRET)
     });
 });
 
-// ✅ UPDATED: Main contract analysis endpoint - now requires authentication
+// Main contract analysis endpoint
 app.post('/api/analyze', authenticateToken, checkSubscriptionLimits, upload.single('contract'), async (req, res) => {
     console.log('📋 Contract analysis request received');
     console.log('User:', req.user.email);
@@ -590,7 +493,6 @@ app.post('/api/analyze', authenticateToken, checkSubscriptionLimits, upload.sing
     try {
         let contractText = '';
 
-        // Extract text from file or use provided text
         if (req.file) {
             contractText = await extractTextFromFile(req.file);
             console.log('📄 Extracted text length:', contractText.length);
@@ -604,7 +506,6 @@ app.post('/api/analyze', authenticateToken, checkSubscriptionLimits, upload.sing
             });
         }
 
-        // FIX: sanitize and set minimum length
         contractText = contractText.replace(/\u00A0/g, ' ').trim();
         const MIN_LENGTH = 50;
         if (!contractText || contractText.length < MIN_LENGTH) {
@@ -617,13 +518,11 @@ app.post('/api/analyze', authenticateToken, checkSubscriptionLimits, upload.sing
         console.log('🤖 Starting AI analysis...');
         const analysis = await analyzeWithOpenRouter(contractText);
 
-        // ✅ NEW: Update user's contract count
         req.user.subscription.contractsAnalyzed += 1;
         await req.user.save();
 
         console.log('✅ Analysis completed successfully');
 
-        // Ensure consistent response shape (FIX)
         const normalized = ensureAnalysisShape(analysis);
 
         res.json({
@@ -634,7 +533,6 @@ app.post('/api/analyze', authenticateToken, checkSubscriptionLimits, upload.sing
                 processedAt: new Date().toISOString(),
                 source: req.file ? 'file' : 'text',
                 model: 'openai/gpt-4o-mini',
-                // ✅ NEW: User analytics
                 user: {
                     contractsAnalyzed: req.user.subscription.contractsAnalyzed,
                     monthlyLimit: req.user.subscription.monthlyLimit,
@@ -658,31 +556,25 @@ async function extractTextFromFile(file) {
     const { buffer, mimetype, originalname } = file;
 
     try {
-        // PDF handling
         if (mimetype === 'application/pdf' || originalname.toLowerCase().endsWith('.pdf')) {
             const data = await pdf(buffer);
             const text = (data && data.text) ? String(data.text) : '';
-            // FIX: detect scanned PDFs (no extracted text)
             if (!text || text.trim().length < 40) {
-                // Provide clear guidance for OCR
                 throw new Error('Scanned or image-based PDF detected (no extractable text). OCR required.');
             }
             return text;
         }
 
-        // DOCX handling
         if (mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
             originalname.toLowerCase().endsWith('.docx')) {
             const result = await mammoth.extractRawText({ buffer });
             return result && result.value ? String(result.value) : '';
         }
 
-        // Plain text
         if (mimetype === 'text/plain' || originalname.toLowerCase().endsWith('.txt')) {
             return buffer.toString('utf8');
         }
 
-        // DOC (older Word) fallback — best-effort
         if (mimetype === 'application/msword' || originalname.toLowerCase().endsWith('.doc')) {
             const asText = buffer.toString('utf8');
             if (asText && asText.trim().length > 40) {
@@ -704,13 +596,11 @@ async function analyzeWithOpenRouter(contractText) {
 
     if (!OPENROUTER_API_KEY) {
         console.error('🔑 OpenRouter API key not found');
-        // Attach assumption to fallback for debugging
         const fallback = createFallbackAnalysis(contractText);
         fallback.assumptions = (fallback.assumptions || []).concat(['AI_unavailable: OPENROUTER_API_KEY missing']);
         return fallback;
     }
 
-    // FIX: limit prompt size and add truncated notice
     const MAX_CHARS_FOR_PROMPT = 16000;
     let truncatedNotice = '';
     let promptContract = contractText;
@@ -754,7 +644,6 @@ Focus on: payment terms, termination clauses, IP ownership, liability, confident
 
 Contract: ${promptContract}${truncatedNotice}`;
 
-    // FIX: retry up to 3 attempts on transient errors
     const MAX_ATTEMPTS = 3;
     let attempt = 0;
     let lastError = null;
@@ -766,7 +655,7 @@ Contract: ${promptContract}${truncatedNotice}`;
             const response = await axios.post(
                 'https://openrouter.ai/api/v1/chat/completions',
                 {
-                    model: 'openai/gpt-4o-mini', // <-- changed model to a broadly available identifier
+                    model: 'openai/gpt-4o-mini',
                     messages: [
                         { role: 'system', content: 'You are a contract analysis expert. Respond only with valid JSON.' },
                         { role: 'user', content: prompt }
@@ -782,17 +671,15 @@ Contract: ${promptContract}${truncatedNotice}`;
                         'X-Title': 'ContractCoach'
                     },
                     timeout: 45000,
-                    validateStatus: null // allow us to inspect non-2xx responses and log them
+                    validateStatus: null
                 }
             );
 
-            // If non-2xx, log body and status to help debugging
             if (response.status && (response.status < 200 || response.status >= 300)) {
                 console.error('🔴 OpenRouter HTTP error:', response.status, response.data);
                 throw new Error(`OpenRouter returned HTTP ${response.status}`);
             }
 
-            // FIX: tolerate multiple response shapes
             let aiContent = '';
             if (response && response.data) {
                 if (Array.isArray(response.data.choices) && response.data.choices[0]) {
@@ -812,24 +699,20 @@ Contract: ${promptContract}${truncatedNotice}`;
             const preview = aiContent.length > 1500 ? aiContent.substring(0, 1500) + '...[truncated]' : aiContent;
             console.log('🤖 OpenRouter raw response preview:', preview);
 
-            // FIX: strip code fences and attempt to parse JSON robustly
             let cleanResponse = aiContent.trim();
             if (cleanResponse.startsWith('```')) {
                 cleanResponse = cleanResponse.replace(/^```(?:json)?\s*/, '').replace(/\s*```$/, '');
             }
 
-            // Attempt direct JSON parse
             let parsed = null;
             try {
                 parsed = JSON.parse(cleanResponse);
             } catch (e) {
-                // Try to extract JSON block
                 const jsonMatch = cleanResponse.match(/\{[\s\S]*\}\s*$/);
                 if (jsonMatch) {
                     try {
                         parsed = JSON.parse(jsonMatch[0]);
                     } catch (e2) {
-                        // Try find first { and last } and parse
                         const first = cleanResponse.indexOf('{');
                         const last = cleanResponse.lastIndexOf('}');
                         if (first !== -1 && last !== -1 && last > first) {
@@ -844,25 +727,20 @@ Contract: ${promptContract}${truncatedNotice}`;
                 }
             }
 
-            // Validate minimal required keys
             if (!parsed || !parsed.summary || typeof parsed.overall_risk_score === 'undefined') {
                 throw new Error('Invalid AI response structure (missing summary or overall_risk_score)');
             }
 
-            // Attach raw output for debugging
             parsed.raw_model_output = aiContent;
-
             return parsed;
 
         } catch (error) {
             lastError = error;
-            // Log response body if axios provided it
             if (error.response) {
                 console.error('🔴 OpenRouter axios error response:', error.response.status, error.response.data);
             }
             const status = error.response && error.response.status;
             console.error(`🔴 OpenRouter attempt ${attempt} failed:`, (error.message || error) + (status ? ` (status ${status})` : ''));
-            // retry only on server errors or rate limit
             if (attempt >= MAX_ATTEMPTS || (status && status < 500 && status !== 429)) {
                 break;
             }
@@ -871,7 +749,6 @@ Contract: ${promptContract}${truncatedNotice}`;
         }
     }
 
-    // On failure, fallback
     console.error('🔴 OpenRouter final error:', lastError && (lastError.stack || lastError.message || lastError));
     console.log('📋 Falling back to keyword analysis');
     const fallback = createFallbackAnalysis(contractText);
@@ -879,7 +756,6 @@ Contract: ${promptContract}${truncatedNotice}`;
     return fallback;
 }
 
-// small helper
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -892,7 +768,6 @@ function createFallbackAnalysis(contractText) {
     let riskScore = 5;
     const foundIssues = [];
 
-    // Payment terms analysis
     if (text.includes('7 days') || text.includes('seven days') || text.includes('due within 7')) {
         riskScore += 2;
         foundIssues.push({
@@ -910,7 +785,6 @@ function createFallbackAnalysis(contractText) {
         });
     }
 
-    // Termination analysis
     if (text.includes('immediate') && text.includes('terminat')) {
         riskScore += 1;
         foundIssues.push({
@@ -928,7 +802,6 @@ function createFallbackAnalysis(contractText) {
         });
     }
 
-    // Indemnification / Liability analysis
     if (text.includes('indemnif') || text.includes('indemnity') || (text.includes('liabil') && text.includes('limit'))) {
         riskScore += 1;
         foundIssues.push({
